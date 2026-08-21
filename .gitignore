@@ -30,3 +30,8 @@ aristotle/
 
 # Data backups taken before a reset. Local only.
 backup-*/
+
+# Assistant working files. These serve Aristotle rather than a human reader,
+# so they stay out of the public repository.
+CLAUDE.md
+CLAUDE.local.md
