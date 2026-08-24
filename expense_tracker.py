@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Iterator, List, Optional, Set
 
 
+KIND_CARD = "card"
+KIND_BANK = "bank"
+PAYMENT_KINDS = (KIND_CARD, KIND_BANK)
+
+KIND_LABELS = {KIND_CARD: "Card", KIND_BANK: "Bank account"}
+
 CADENCE_ONCE = "once"
 CADENCE_WEEKLY = "weekly"
 CADENCE_MONTHLY = "monthly"
@@ -40,19 +46,29 @@ LABELS_TO_CADENCE = {label: cadence for cadence, label in CADENCE_LABELS.items()
 
 @dataclass
 class Card:
-    """A credit card, tracked for its due date rather than its cost.
+    """A payment source: a credit card, or a bank account.
 
     A card payment is a settlement, not a purchase: the spending happened when
     the card was used, and those items are recorded separately. So a card
     carries no amount of its own — only what was actually paid each month,
     which is a different number every time.
+
+    A bank account is the same idea with less to it. Money leaves it when a
+    subscription bills, so there is no separate bill to pay and no due day of
+    its own; `due_day` is None and nothing is ever recorded against it. It
+    exists so a subscription can say where it is charged.
     """
 
     id: str
     name: str
-    due_day: int
+    due_day: Optional[int] = None
     color: str = "#5b8ac7"
     notes: str = ""
+    kind: str = KIND_CARD
+
+    @property
+    def is_card(self) -> bool:
+        return self.kind == KIND_CARD
 
 
 @dataclass
@@ -75,6 +91,10 @@ class Expense:
     # `ends_on` the last one, inclusive; None means it has not been cancelled.
     cadence: str = ""
     ends_on: Optional[str] = None
+    # Which card or bank account this is charged to, as a Card id. None means
+    # it has not been said. Purely a label: linking a subscription to a card
+    # never moves money between the two halves of the application.
+    paid_with: Optional[str] = None
 
     def __post_init__(self) -> None:
         # `cadence` supersedes the older `recurring_monthly` flag. Normalising
@@ -119,6 +139,8 @@ def _migrate_expense_columns(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE expenses ADD COLUMN cadence TEXT")
     if "ends_on" not in existing:
         connection.execute("ALTER TABLE expenses ADD COLUMN ends_on TEXT")
+    if "paid_with" not in existing:
+        connection.execute("ALTER TABLE expenses ADD COLUMN paid_with TEXT")
 
     connection.execute(
         """
@@ -146,6 +168,22 @@ def _new_id() -> str:
     return datetime.now().strftime("%Y%m%d%H%M%S%f") + "-" + secrets.token_hex(4)
 
 
+def _migrate_card_columns(connection: sqlite3.Connection) -> None:
+    """Add `kind` to card tables written before bank accounts existed.
+
+    Everything already stored was a credit card, which is the column default,
+    so nothing needs back-filling beyond the default itself.
+    """
+    try:
+        existing = {row[1] for row in connection.execute("PRAGMA table_info(cards)").fetchall()}
+    except sqlite3.OperationalError:
+        return
+    if not existing:
+        return
+    if "kind" not in existing:
+        connection.execute("ALTER TABLE cards ADD COLUMN kind TEXT NOT NULL DEFAULT 'card'")
+
+
 def create_schema(data_file: Path) -> None:
     data_file.parent.mkdir(parents=True, exist_ok=True)
     with _connect(data_file) as connection:
@@ -163,11 +201,13 @@ def create_schema(data_file: Path) -> None:
                 expense_type TEXT NOT NULL DEFAULT 'Fixed',
                 color TEXT NOT NULL DEFAULT '#f4a261',
                 cadence TEXT,
-                ends_on TEXT
+                ends_on TEXT,
+                paid_with TEXT
             )
             """
         )
         _migrate_expense_columns(connection)
+        _migrate_card_columns(connection)
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS expense_payments (
@@ -189,9 +229,10 @@ def create_schema(data_file: Path) -> None:
             CREATE TABLE IF NOT EXISTS cards (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
-                due_day INTEGER NOT NULL,
+                due_day INTEGER,
                 color TEXT NOT NULL DEFAULT '#5b8ac7',
-                notes TEXT NOT NULL DEFAULT ''
+                notes TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL DEFAULT 'card'
             )
             """
         )
@@ -326,6 +367,7 @@ def _to_dict(expense: Expense) -> dict[str, object]:
         "color": expense.color,
         "cadence": expense.cadence,
         "ends_on": expense.ends_on,
+        "paid_with": expense.paid_with,
     }
 
 
@@ -339,10 +381,11 @@ def _upsert_expenses(connection: sqlite3.Connection, expenses: List[Expense]) ->
             """
             INSERT INTO expenses (
                 id, description, amount, date, account, category,
-                recurring_monthly, due_day, expense_type, color, cadence, ends_on
+                recurring_monthly, due_day, expense_type, color, cadence, ends_on, paid_with
             ) VALUES (
                 :id, :description, :amount, :date, :account, :category,
-                :recurring_monthly, :due_day, :expense_type, :color, :cadence, :ends_on
+                :recurring_monthly, :due_day, :expense_type, :color, :cadence, :ends_on,
+                :paid_with
             )
             ON CONFLICT(id) DO UPDATE SET
                 description = excluded.description,
@@ -355,7 +398,8 @@ def _upsert_expenses(connection: sqlite3.Connection, expenses: List[Expense]) ->
                 expense_type = excluded.expense_type,
                 color = excluded.color,
                 cadence = excluded.cadence,
-                ends_on = excluded.ends_on
+                ends_on = excluded.ends_on,
+                paid_with = excluded.paid_with
             """,
             data,
         )
@@ -402,7 +446,7 @@ def load_expenses(data_file: Path) -> List[Expense]:
         rows = connection.execute(
             """
             SELECT id, description, amount, date, account, category, recurring_monthly,
-                   due_day, expense_type, color, cadence, ends_on
+                   due_day, expense_type, color, cadence, ends_on, paid_with
             FROM expenses
             ORDER BY date, description
             """
@@ -422,6 +466,7 @@ def load_expenses(data_file: Path) -> List[Expense]:
             color=row["color"] or "#f4a261",
             cadence=row["cadence"] or "",
             ends_on=row["ends_on"],
+            paid_with=row["paid_with"],
         )
         for row in rows
     ]
@@ -464,10 +509,10 @@ def add_expense(data_file: Path, expense: Expense) -> None:
             """
             INSERT INTO expenses (
                 id, description, amount, date, account, category, recurring_monthly,
-                due_day, expense_type, color, cadence, ends_on
+                due_day, expense_type, color, cadence, ends_on, paid_with
             ) VALUES (
                 :id, :description, :amount, :date, :account, :category, :recurring_monthly,
-                :due_day, :expense_type, :color, :cadence, :ends_on
+                :due_day, :expense_type, :color, :cadence, :ends_on, :paid_with
             )
             """,
             payload,
@@ -501,7 +546,8 @@ def update_expense(data_file: Path, expense: Expense) -> None:
                 expense_type = :expense_type,
                 color = :color,
                 cadence = :cadence,
-                ends_on = :ends_on
+                ends_on = :ends_on,
+                paid_with = :paid_with
             WHERE id = :id
             """,
             _to_dict(expense),
@@ -528,21 +574,29 @@ def delete_expense(data_file: Path, expense_id: str) -> None:
 
 def create_card(
     name: str,
-    due_day: int,
+    due_day: Optional[int] = None,
     color: str = "#5b8ac7",
     notes: str = "",
     card_id: Optional[str] = None,
+    kind: str = KIND_CARD,
 ) -> Card:
-    try:
-        day = int(due_day)
-    except (TypeError, ValueError):
-        raise ValueError("a card needs a due day between 1 and 31")
-    if not 1 <= day <= 31:
-        raise ValueError("a card needs a due day between 1 and 31")
+    """A card needs a due day; a bank account has none and must not carry one."""
+    if kind not in PAYMENT_KINDS:
+        raise ValueError(f"unknown payment source kind {kind!r}")
 
     cleaned = name.strip()
     if not cleaned:
-        raise ValueError("a card needs a name")
+        raise ValueError("a payment source needs a name")
+
+    if kind == KIND_BANK:
+        day = None
+    else:
+        try:
+            day = int(due_day)
+        except (TypeError, ValueError):
+            raise ValueError("a card needs a due day between 1 and 31")
+        if not 1 <= day <= 31:
+            raise ValueError("a card needs a due day between 1 and 31")
 
     return Card(
         id=card_id or _new_id(),
@@ -550,6 +604,7 @@ def create_card(
         due_day=day,
         color=color or "#5b8ac7",
         notes=notes.strip(),
+        kind=kind,
     )
 
 
@@ -560,7 +615,7 @@ def load_cards(data_file: Path) -> List[Card]:
         with _connect(data_file) as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
-                "SELECT id, name, due_day, color, notes FROM cards ORDER BY due_day, name"
+                "SELECT id, name, due_day, color, notes, kind FROM cards ORDER BY kind DESC, due_day, name"
             ).fetchall()
     except sqlite3.OperationalError:
         # A database written before cards existed.
@@ -572,6 +627,7 @@ def load_cards(data_file: Path) -> List[Card]:
             due_day=row["due_day"],
             color=row["color"] or "#5b8ac7",
             notes=row["notes"] or "",
+            kind=row["kind"] or KIND_CARD,
         )
         for row in rows
     ]
@@ -589,27 +645,47 @@ def save_card(data_file: Path, card: Card) -> None:
     with _connect(data_file) as connection:
         connection.execute(
             """
-            INSERT INTO cards (id, name, due_day, color, notes)
-            VALUES (:id, :name, :due_day, :color, :notes)
+            INSERT INTO cards (id, name, due_day, color, notes, kind)
+            VALUES (:id, :name, :due_day, :color, :notes, :kind)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 due_day = excluded.due_day,
                 color = excluded.color,
-                notes = excluded.notes
+                notes = excluded.notes,
+                kind = excluded.kind
             """,
             asdict(card),
         )
 
 
 def delete_card(data_file: Path, card_id: str) -> None:
+    """Remove a payment source, and unlink anything charged to it.
+
+    Subscriptions keep a card id rather than a copy of its name, so deleting a
+    source would otherwise leave them pointing at nothing. They are cleared
+    rather than deleted: the subscription still exists and still bills, it just
+    no longer says where from.
+    """
     if data_file.suffix.lower() == ".json" or not data_file.exists():
         return
     with _connect(data_file) as connection:
         connection.execute("DELETE FROM cards WHERE id = ?", (card_id,))
+        try:
+            connection.execute(
+                "UPDATE expenses SET paid_with = NULL WHERE paid_with = ?", (card_id,)
+            )
+        except sqlite3.OperationalError:
+            # A database written before the link existed.
+            pass
 
 
-def card_due_date(card: Card, year: int, month: int) -> date:
-    """The card's due date in a given month, clamped to months that are short."""
+def card_due_date(card: Card, year: int, month: int) -> Optional[date]:
+    """The card's due date in a month, clamped to months that are short.
+
+    None for a bank account, which has no bill of its own and so no due date.
+    """
+    if card.due_day is None:
+        return None
     last_day = calendar.monthrange(year, month)[1]
     return date(year, month, min(card.due_day, last_day))
 
@@ -674,6 +750,46 @@ def get_card_payment_history(data_file: Path, card_id: str, limit: int = 12) -> 
     return [(row[0], row[1], row[2]) for row in rows]
 
 
+def cards_only(cards: List[Card]) -> List[Card]:
+    """Just the credit cards. Bank accounts have no bill and no due date."""
+    return [card for card in cards if card.is_card]
+
+
+def find_card(cards: List[Card], card_id: Optional[str]) -> Optional[Card]:
+    if not card_id:
+        return None
+    return next((card for card in cards if card.id == card_id), None)
+
+
+def payment_source_name(cards: List[Card], card_id: Optional[str]) -> str:
+    """A subscription's payment source, for display. Empty when unset."""
+    card = find_card(cards, card_id)
+    return card.name if card else ""
+
+
+def expenses_charged_to(expenses: List[Expense], card_id: str) -> List[Expense]:
+    """Every subscription pointing at one payment source, still-running first."""
+    matching = [expense for expense in expenses if expense.paid_with == card_id]
+    today = date.today()
+    return sorted(
+        matching,
+        key=lambda item: (next_occurrence(item, today) is None, item.description.lower()),
+    )
+
+
+def subscription_run_rate_for_source(expenses: List[Expense], card_id: str) -> float:
+    """What the subscriptions on one payment source cost per month.
+
+    Uses the same per-cadence normalisation as the headline run rate, so a
+    yearly renewal charged to a card counts as a twelfth rather than landing
+    whole in one month.
+    """
+    return round(
+        sum(monthly_equivalent(expense) for expense in expenses_charged_to(expenses, card_id)),
+        2,
+    )
+
+
 def get_card_year_totals(data_file: Path, year: int) -> dict:
     """What was paid against each card across one year, keyed by card id."""
     if data_file.suffix.lower() == ".json" or not data_file.exists():
@@ -725,9 +841,11 @@ def get_card_years(data_file: Path) -> List[int]:
 def get_cards_due_in_month(cards: List[Card], year: int, month: int) -> dict:
     """Cards falling due in a month, keyed by ISO date, for the calendar."""
     by_day: dict = {}
-    for card in cards:
-        key = card_due_date(card, year, month).isoformat()
-        by_day.setdefault(key, []).append(card)
+    for card in cards_only(cards):
+        due = card_due_date(card, year, month)
+        if due is None:
+            continue
+        by_day.setdefault(due.isoformat(), []).append(card)
     return by_day
 
 
@@ -736,7 +854,7 @@ def get_cards_due_between(cards: List[Card], start: date, days: int = 14) -> Lis
     upcoming: List[tuple] = []
     for offset in range(days + 1):
         day = start + timedelta(days=offset)
-        for card in cards:
+        for card in cards_only(cards):
             if card_due_date(card, day.year, day.month) == day:
                 upcoming.append((day, card))
     return sorted(upcoming, key=lambda pair: (pair[0], pair[1].name.lower()))
@@ -761,6 +879,7 @@ def create_expense(
     cadence: str = "",
     ends_on: Optional[str] = None,
     expense_id: Optional[str] = None,
+    paid_with: Optional[str] = None,
 ) -> Expense:
     normalized_amount = None if amount is None else round(float(amount), 2)
     normalized_date = expense_date or ""
@@ -790,6 +909,7 @@ def create_expense(
         color=color,
         cadence=cadence,
         ends_on=ends_on,
+        paid_with=paid_with or None,
     )
 
 

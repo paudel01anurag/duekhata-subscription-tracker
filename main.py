@@ -61,6 +61,14 @@ from expense_tracker import (
     set_card_payment,
     get_card_payments_for_year,
     get_card_year_totals,
+    KIND_BANK,
+    KIND_CARD,
+    KIND_LABELS,
+    cards_only,
+    expenses_charged_to,
+    find_card,
+    payment_source_name,
+    subscription_run_rate_for_source,
 )
 
 
@@ -241,6 +249,7 @@ DETAILS_WIDTH = 372
 
 ALL_CATEGORIES = "All categories"
 ALL_CADENCES = "Any"
+NO_PAYMENT_SOURCE = "Not set"
 # Day-list rows for cards carry this prefix so their ids can never collide with
 # an expense id, which is what the edit and delete actions look up.
 CARD_ROW_PREFIX = "card:"
@@ -1704,15 +1713,16 @@ class ExpenseTrackerApp:
 
         self.all_list = ttk.Treeview(
             view,
-            columns=("description", "amount", "cadence", "next", "category"),
+            columns=("description", "amount", "cadence", "next", "category", "source"),
             show="headings",
         )
         headings = (
-            ("description", "DESCRIPTION", 300, "w", True),
+            ("description", "DESCRIPTION", 250, "w", True),
             ("amount", "AMOUNT", 95, "e", False),
             ("cadence", "REPEATS", 100, "w", False),
-            ("next", "NEXT DUE", 120, "w", False),
-            ("category", "CATEGORY", 140, "w", False),
+            ("next", "NEXT DUE", 115, "w", False),
+            ("category", "CATEGORY", 130, "w", False),
+            ("source", "CHARGED TO", 150, "w", False),
         )
         for key, title, width, anchor, stretch in headings:
             self.all_list.heading(key, text=title, anchor=anchor)
@@ -1771,16 +1781,18 @@ class ExpenseTrackerApp:
 
         self.cards_list = ttk.Treeview(
             view,
-            columns=("name", "due", "this_month", "last_month", "change", "year"),
+            columns=("name", "kind", "due", "subs", "this_month", "last_month", "change", "year"),
             show="headings",
         )
         headings = (
-            ("name", "CARD", 230, "w", True),
-            ("due", "DUE", 110, "w", False),
-            ("this_month", "THIS MONTH", 120, "e", False),
-            ("last_month", "LAST MONTH", 120, "e", False),
-            ("change", "VS LAST MONTH", 130, "e", False),
-            ("year", "PAID THIS YEAR", 130, "e", False),
+            ("name", "NAME", 190, "w", True),
+            ("kind", "KIND", 105, "w", False),
+            ("due", "DUE", 90, "w", False),
+            ("subs", "SUBSCRIPTIONS", 145, "e", False),
+            ("this_month", "THIS MONTH", 110, "e", False),
+            ("last_month", "LAST MONTH", 110, "e", False),
+            ("change", "VS LAST MONTH", 120, "e", False),
+            ("year", "PAID THIS YEAR", 120, "e", False),
         )
         for key, title, width, anchor, stretch in headings:
             self.cards_list.heading(key, text=title, anchor=anchor)
@@ -1869,6 +1881,23 @@ class ExpenseTrackerApp:
         year_totals = get_card_year_totals(self.data_file, year)
 
         for card in self.cards:
+            run_rate = subscription_run_rate_for_source(self.expenses, card.id)
+            linked = len(expenses_charged_to(self.expenses, card.id))
+            subs_text = "—" if not linked else (
+                str(linked) + " · $" + format(run_rate, ",.2f") + "/mo"
+            )
+
+            if not card.is_card:
+                # A bank account has no bill of its own, so every column about
+                # paying one off is blank rather than zero. Zero would claim
+                # something was owed and settled.
+                self.cards_list.insert(
+                    "", "end",
+                    values=(card.name, KIND_LABELS[card.kind], "—", subs_text, "—", "—", "—", "—"),
+                    iid=card.id,
+                )
+                continue
+
             due = card_due_date(card, year, month)
             paid = this_month.get(card.id)
             previous = last_month.get(card.id)
@@ -1891,7 +1920,9 @@ class ExpenseTrackerApp:
                 "", "end",
                 values=(
                     card.name,
-                    due.strftime("%d %b"),
+                    KIND_LABELS[card.kind],
+                    due.strftime("%d %b") if due else "—",
+                    subs_text,
                     "not yet" if paid is None else "$" + format(paid, ",.2f"),
                     "—" if previous is None else "$" + format(previous, ",.2f"),
                     change,
@@ -1901,13 +1932,17 @@ class ExpenseTrackerApp:
             )
 
         if not self.cards:
-            self.cards_summary.config(text="No cards yet. Add one to keep an eye on its due date.")
+            self.cards_summary.config(
+                text="Nothing here yet. Add a card to watch its due date, or a bank account so a "
+                "subscription can say where it is charged."
+            )
             self.card_stat_values = {"year": 0.0, "month": 0.0, "outstanding": 0}
             self._draw_card_stats()
             return
 
-        outstanding = [card for card in self.cards if card.id not in this_month]
-        word = "card" if len(self.cards) == 1 else "cards"
+        billable = cards_only(self.cards)
+        outstanding = [card for card in billable if card.id not in this_month]
+        word = "payment source" if len(self.cards) == 1 else "payment sources"
         summary = str(len(self.cards)) + " " + word
         if outstanding:
             summary += "  ·  still to pay this month: " + ", ".join(card.name for card in outstanding)
@@ -1970,6 +2005,13 @@ class ExpenseTrackerApp:
         card = self._selected_card()
         if card is None:
             messagebox.showinfo("Nothing selected", "Select a card in the list first.")
+            return
+        if not card.is_card:
+            messagebox.showinfo(
+                "Nothing to record",
+                card.name + " is a bank account. Money leaves it when a subscription bills, so "
+                "there is no separate payment to record.",
+            )
             return
 
         dialog = CardPaymentDialog(
@@ -2991,6 +3033,7 @@ class ExpenseTrackerApp:
             self.selected_date,
             self.expenses,
             theme_mode=self.theme_mode.get(),
+            payment_sources=self.cards,
         )
         dialog.grab_set()
         self.root.wait_window(dialog)
@@ -3052,7 +3095,10 @@ class ExpenseTrackerApp:
                 "",
                 "end",
                 iid=expense.id,
-                values=(expense.description, amount, cadence, due, expense.category),
+                values=(
+                    expense.description, amount, cadence, due, expense.category,
+                    payment_source_name(self.cards, expense.paid_with) or "—",
+                ),
             )
 
         total = len([e for e in self.expenses if e.amount is not None])
@@ -3131,6 +3177,7 @@ class ExpenseTrackerApp:
             self.expenses,
             theme_mode=self.theme_mode.get(),
             expense=expense,
+            payment_sources=self.cards,
         )
         dialog.grab_set()
         self.root.wait_window(dialog)
@@ -3341,7 +3388,12 @@ class CardDialog(tk.Toplevel):
         self.option_add("*insertBackground", self.theme["input_cursor"])
 
         self.name_var = tk.StringVar(value=card.name if self.editing else "")
-        self.due_day_var = tk.StringVar(value=str(card.due_day) if self.editing else "1")
+        self.kind_var = tk.StringVar(
+            value=KIND_LABELS[card.kind if self.editing else KIND_CARD]
+        )
+        self.due_day_var = tk.StringVar(
+            value=str(card.due_day) if self.editing and card.due_day else "1"
+        )
         self.notes_var = tk.StringVar(value=card.notes if self.editing else "")
         self.color_var = tk.StringVar(value=card.color if self.editing else CARD_COLOUR)
 
@@ -3351,15 +3403,16 @@ class CardDialog(tk.Toplevel):
 
         header = tk.Frame(self, bg=self.theme["background"])
         header.grid(row=0, column=0, columnspan=2, sticky="ew", padx=SPACE_5, pady=(SPACE_5, SPACE_4))
-        tk.Label(
+        self.title_label = tk.Label(
             header,
             text="Edit card" if self.editing else "Add a card",
             bg=self.theme["background"],
             fg=self.theme["text"],
             font=display_font(16),
-        ).pack(side="left", anchor="w")
+        )
+        self.title_label.pack(side="left", anchor="w")
 
-        ttk.Label(self, text="Card name").grid(row=1, column=0, columnspan=2, sticky="w", padx=SPACE_5, pady=(0, SPACE_1))
+        ttk.Label(self, text="Name").grid(row=1, column=0, columnspan=2, sticky="w", padx=SPACE_5, pady=(0, SPACE_1))
         tk.Entry(
             self,
             textvariable=self.name_var,
@@ -3374,22 +3427,34 @@ class CardDialog(tk.Toplevel):
             highlightcolor=self.theme["accent"],
         ).grid(row=2, column=0, columnspan=2, sticky="ew", padx=SPACE_5, pady=(0, SPACE_3), ipady=7)
 
-        ttk.Label(self, text="Payment due on").grid(row=3, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_1))
+        ttk.Label(self, text="This is a").grid(row=3, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_1))
+        kind_box = ttk.Combobox(
+            self, textvariable=self.kind_var, state="readonly", width=16,
+            values=[KIND_LABELS[KIND_CARD], KIND_LABELS[KIND_BANK]],
+        )
+        kind_box.grid(row=4, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_3))
+        kind_box.bind("<<ComboboxSelected>>", lambda _event: self._sync_kind())
+
+        # Only a card has a bill of its own to pay. Money leaves a bank account
+        # when a subscription bills, so a due day there would be a fiction.
+        self.due_label = ttk.Label(self, text="Payment due on")
+        self.due_label.grid(row=3, column=1, sticky="w", padx=(SPACE_5, 0), pady=(0, SPACE_1))
         self.due_box = ttk.Combobox(
             self, textvariable=self.due_day_var, state="readonly", width=8,
             values=[str(day) for day in range(1, 32)],
         )
-        self.due_box.grid(row=4, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_1))
+        self.due_box.grid(row=4, column=1, sticky="w", padx=(SPACE_5, 0), pady=(0, SPACE_3))
 
-        tk.Label(
+        self.kind_hint = tk.Label(
             self,
-            text="Day of the month. A day past the end of a short month falls on its last day.",
+            text="",
             bg=self.theme["background"],
             fg=self.theme["text_muted"],
             font=text_font(9),
             justify="left",
             wraplength=380,
-        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=SPACE_5, pady=(0, SPACE_3))
+        )
+        self.kind_hint.grid(row=5, column=0, columnspan=2, sticky="w", padx=SPACE_5, pady=(0, SPACE_3))
 
         ttk.Label(self, text="Note (optional)").grid(row=6, column=0, columnspan=2, sticky="w", padx=SPACE_5, pady=(0, SPACE_1))
         tk.Entry(
@@ -3442,6 +3507,7 @@ class CardDialog(tk.Toplevel):
         if not self.swatches_visible:
             swatches.grid_remove()
         self._paint_swatches()
+        self._sync_kind()
 
         # A card is not spending, and the form is the right place to say so
         # rather than leaving the user to discover it from the totals.
@@ -3495,6 +3561,32 @@ class CardDialog(tk.Toplevel):
             width = 3 if colour == chosen else 1
             canvas.create_oval(2, 2, 24, 24, fill=colour, outline=outline, width=width)
 
+    def _selected_kind(self) -> str:
+        return KIND_BANK if self.kind_var.get() == KIND_LABELS[KIND_BANK] else KIND_CARD
+
+    def _sync_kind(self) -> None:
+        """A bank account has no bill of its own, so it has no due day."""
+        is_card = self._selected_kind() == KIND_CARD
+        self.due_box.configure(state="readonly" if is_card else "disabled")
+        if is_card:
+            self.due_label.grid()
+            self.due_box.grid()
+            self.kind_hint.configure(
+                text="Day of the month the bill is due. A day past the end of a short month "
+                "falls on its last day."
+            )
+        else:
+            self.due_label.grid_remove()
+            self.due_box.grid_remove()
+            self.kind_hint.configure(
+                text="A bank account has no bill of its own — money leaves it when a "
+                "subscription bills. It is here so a subscription can say where it is charged."
+            )
+        self.title_label.configure(
+            text=("Edit " if self.editing else "Add a ")
+            + ("card" if is_card else "bank account")
+        )
+
     def save_card_entry(self) -> None:
         try:
             card = create_card(
@@ -3503,6 +3595,7 @@ class CardDialog(tk.Toplevel):
                 color=self.color_var.get(),
                 notes=self.notes_var.get(),
                 card_id=self.original.id if self.editing else None,
+                kind=self._selected_kind(),
             )
         except ValueError as error:
             messagebox.showwarning("Check the card", str(error))
@@ -3523,9 +3616,15 @@ class AddExpenseDialog(tk.Toplevel):
         existing_expenses: list,
         theme_mode: str = "light",
         expense=None,
+        payment_sources=None,
     ) -> None:
         super().__init__(master)
         self.editing = expense is not None
+        # Read from the database rather than required from the caller, so an
+        # older call site still opens a working dialog.
+        self.payment_sources = (
+            list(payment_sources) if payment_sources is not None else load_cards(data_file)
+        )
         self.original = expense
         self.title("Edit subscription" if self.editing else "Add payment")
         self.data_file = data_file
@@ -3548,6 +3647,12 @@ class AddExpenseDialog(tk.Toplevel):
         self.calendar_date = start_date
         self.category_var = tk.StringVar(value=expense.category if self.editing else "Subscription")
         self.expense_type_var = tk.StringVar(value=expense.expense_type if self.editing else "Fixed")
+        # A subscription whose source was deleted falls back to "Not set"
+        # rather than showing a name that no longer exists.
+        existing_source = (
+            payment_source_name(self.payment_sources, expense.paid_with) if self.editing else ""
+        )
+        self.source_var = tk.StringVar(value=existing_source or NO_PAYMENT_SOURCE)
         self.color_var = tk.StringVar(value=(expense.color if self.editing else "#f2c14e"))
         self.color_choices_visible = False
         self.cadence_var = tk.StringVar(
@@ -3687,6 +3792,15 @@ class AddExpenseDialog(tk.Toplevel):
         type_box["values"] = ["Fixed", "Variable"]
         type_box.grid(row=12, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_3))
 
+        # Which card or bank account this is charged to. Purely a label: it
+        # never moves money between subscriptions and cards.
+        ttk.Label(self, text="Charged to").grid(row=11, column=1, sticky="w", padx=(SPACE_5, 0), pady=(0, SPACE_1))
+        self.source_box = ttk.Combobox(
+            self, textvariable=self.source_var, state="readonly", width=20,
+            values=[NO_PAYMENT_SOURCE] + [card.name for card in self.payment_sources],
+        )
+        self.source_box.grid(row=12, column=1, sticky="w", padx=(SPACE_5, 0), pady=(0, SPACE_3))
+
         recurring_frame = tk.Frame(self, bg=self.theme["background"])
         recurring_frame.grid(row=12, column=1, sticky="w", padx=(SPACE_5, 0), pady=(0, SPACE_3))
         ttk.Checkbutton(
@@ -3752,6 +3866,14 @@ class AddExpenseDialog(tk.Toplevel):
         self.color_preview.delete("all")
         color = self.color_var.get()
         self.color_preview.create_oval(1, 1, 24, 24, fill=color, outline=mix(color, "#000000", 0.2))
+
+    def _selected_source_id(self):
+        """The chosen payment source as an id, or None for "Not set"."""
+        chosen = self.source_var.get()
+        if not chosen or chosen == NO_PAYMENT_SOURCE:
+            return None
+        match = next((card for card in self.payment_sources if card.name == chosen), None)
+        return match.id if match else None
 
     def _suggested_categories(self) -> list[str]:
         # "Credit Card" is deliberately absent. Card payments settle purchases
@@ -3881,6 +4003,7 @@ class AddExpenseDialog(tk.Toplevel):
             category=self.category_var.get().strip() or "Other",
             due_day=due_day,
             expense_type=self.expense_type_var.get().strip() or "Fixed",
+            paid_with=self._selected_source_id(),
             color=self.color_var.get() or "#f2c14e",
             cadence=cadence,
             ends_on=ends_on,
