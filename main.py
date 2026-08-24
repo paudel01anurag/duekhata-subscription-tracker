@@ -3801,8 +3801,10 @@ class AddExpenseDialog(tk.Toplevel):
         )
         self.source_box.grid(row=12, column=1, sticky="w", padx=(SPACE_5, 0), pady=(0, SPACE_3))
 
+        # Its own row. Sharing row 12 column 1 with the Charged to dropdown put
+        # two widgets in one grid cell, and the checkbox drew over the dropdown.
         recurring_frame = tk.Frame(self, bg=self.theme["background"])
-        recurring_frame.grid(row=12, column=1, sticky="w", padx=(SPACE_5, 0), pady=(0, SPACE_3))
+        recurring_frame.grid(row=13, column=0, columnspan=2, sticky="w", padx=SPACE_5, pady=(0, SPACE_3))
         ttk.Checkbutton(
             recurring_frame,
             text="Mark as paid this month",
@@ -3811,7 +3813,7 @@ class AddExpenseDialog(tk.Toplevel):
         self._sync_end_date_state()
 
         color_panel = tk.Frame(self, bg=self.theme["background"])
-        color_panel.grid(row=13, column=0, columnspan=2, sticky="w", padx=SPACE_5, pady=(SPACE_2, SPACE_3))
+        color_panel.grid(row=14, column=0, columnspan=2, sticky="w", padx=SPACE_5, pady=(SPACE_2, SPACE_3))
         tk.Label(color_panel, text="Color", bg=self.theme["background"], fg=self.theme["text"], font=text_font(10)).pack(side="left", padx=(0, SPACE_2))
         self.color_preview = tk.Canvas(
             color_panel,
@@ -3833,7 +3835,7 @@ class AddExpenseDialog(tk.Toplevel):
         self.color_toggle_button.pack(side="left")
 
         self.color_choices = tk.Frame(self, bg=self.theme["background"])
-        self.color_choices.grid(row=14, column=0, columnspan=2, sticky="w", padx=SPACE_5, pady=(0, SPACE_3))
+        self.color_choices.grid(row=15, column=0, columnspan=2, sticky="w", padx=SPACE_5, pady=(0, SPACE_3))
         for color in ["#f2c14e", "#d97745", "#668f80", "#5f7db8", "#8d6fb0"]:
             swatch = tk.Canvas(
                 self.color_choices,
@@ -3858,7 +3860,7 @@ class AddExpenseDialog(tk.Toplevel):
         self.color_choices.grid_remove()
 
         actions = tk.Frame(self, bg=self.theme["background"])
-        actions.grid(row=15, column=0, columnspan=2, sticky="e", padx=SPACE_5, pady=(SPACE_2, SPACE_5))
+        actions.grid(row=16, column=0, columnspan=2, sticky="e", padx=SPACE_5, pady=(SPACE_2, SPACE_5))
         PillButton(actions, "Cancel", self.destroy, self.theme, variant="tonal").grid(row=0, column=0, padx=(0, SPACE_2))
         PillButton(actions, "Save subscription", self.save_expense, self.theme, variant="filled").grid(row=0, column=1)
 
