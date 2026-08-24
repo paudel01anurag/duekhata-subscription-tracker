@@ -92,29 +92,50 @@ def unregister_app_id() -> bool:
     return ok
 
 
-def show_toast(heading: str, body: str) -> bool:
-    """Raise one desktop notification. Returns whether Windows accepted it."""
-    if not is_supported():
-        return False
+def toast_xml(heading: str, body: str) -> str:
+    """The notification document Windows will be given.
 
-    xml = (
-        "<toast><visual><binding template='ToastGeneric'>"
+    Attributes use double quotes so the whole document contains no single
+    quote, which is what lets it sit inside a PowerShell literal string.
+    """
+    return (
+        '<toast><visual><binding template="ToastGeneric">'
         "<text>" + _escape(heading) + "</text>"
         "<text>" + _escape(body) + "</text>"
         "</binding></visual></toast>"
     )
-    script = (
+
+
+def _toast_script(xml: str) -> str:
+    """Wrap the document in PowerShell that shows it.
+
+    The XML goes inside a **single-quoted** PowerShell string. A double-quoted
+    one - including the here-string used before - expands variables, so an
+    amount like $22.99 arrived as .99: PowerShell read `$22` as a variable,
+    found nothing, and substituted emptiness. Single quotes take text literally.
+
+    Any single quote inside is doubled, PowerShell's own escape, although
+    `_escape` has already turned quotes into entities by this point.
+    """
+    literal = xml.replace("'", "''")
+    return (
         "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications,"
         " ContentType = WindowsRuntime] > $null;"
         "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom,"
         " ContentType = WindowsRuntime] > $null;"
         "$doc = New-Object Windows.Data.Xml.Dom.XmlDocument;"
-        '$doc.LoadXml(@"\n' + xml + '\n"@);'
+        "$doc.LoadXml('" + literal + "');"
         "$toast = New-Object Windows.UI.Notifications.ToastNotification $doc;"
         "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('"
         + APP_ID + "').Show($toast)"
     )
-    ok, _output = _run_powershell(script)
+
+
+def show_toast(heading: str, body: str) -> bool:
+    """Raise one desktop notification. Returns whether Windows accepted it."""
+    if not is_supported():
+        return False
+    ok, _output = _run_powershell(_toast_script(toast_xml(heading, body)))
     return ok
 
 
