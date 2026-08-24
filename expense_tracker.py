@@ -251,6 +251,17 @@ def create_schema(data_file: Path) -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS reminders_sent (
+                kind TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                due_on TEXT NOT NULL,
+                sent_on TEXT NOT NULL DEFAULT (DATE('now')),
+                PRIMARY KEY (kind, record_id, due_on)
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS app_metadata (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -788,6 +799,188 @@ def subscription_run_rate_for_source(expenses: List[Expense], card_id: str) -> f
         sum(monthly_equivalent(expense) for expense in expenses_charged_to(expenses, card_id)),
         2,
     )
+
+
+def get_setting(data_file: Path, key: str, default: str = "") -> str:
+    if data_file.suffix.lower() == ".json" or not data_file.exists():
+        return default
+    try:
+        with _connect(data_file) as connection:
+            row = connection.execute(
+                "SELECT value FROM app_metadata WHERE key = ?", (key,)
+            ).fetchone()
+    except sqlite3.OperationalError:
+        return default
+    return row[0] if row else default
+
+
+def set_setting(data_file: Path, key: str, value: str) -> None:
+    if data_file.suffix.lower() == ".json":
+        return
+    create_schema(data_file)
+    with _connect(data_file) as connection:
+        connection.execute(
+            "INSERT INTO app_metadata (key, value) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+
+REMINDERS_ENABLED = "reminders_enabled"
+REMINDER_DAYS = "reminder_days"
+REMINDER_TIME = "reminder_time"
+DEFAULT_REMINDER_DAYS = 3
+
+
+def reminders_are_on(data_file: Path) -> bool:
+    return get_setting(data_file, REMINDERS_ENABLED, "0") == "1"
+
+
+def reminder_days(data_file: Path) -> int:
+    """How many days of warning. Falls back rather than failing on bad data."""
+    try:
+        days = int(get_setting(data_file, REMINDER_DAYS, str(DEFAULT_REMINDER_DAYS)))
+    except (TypeError, ValueError):
+        return DEFAULT_REMINDER_DAYS
+    return days if 0 <= days <= 30 else DEFAULT_REMINDER_DAYS
+
+
+# --- reminders -----------------------------------------------------------
+
+
+@dataclass
+class Reminder:
+    """One thing worth telling someone about before it happens.
+
+    Deliberately free of any notification machinery: this says what is coming,
+    and something else decides how to say it. That keeps the interesting part
+    testable without a desktop.
+    """
+
+    kind: str          # "subscription" or "card"
+    record_id: str
+    title: str
+    due: date
+    amount: Optional[float] = None
+    source: str = ""
+
+    def when(self, today: date) -> str:
+        days = (self.due - today).days
+        if days == 0:
+            return "today"
+        if days == 1:
+            return "tomorrow"
+        return "in " + str(days) + " days"
+
+    def headline(self) -> str:
+        return self.title
+
+    def detail(self, today: date) -> str:
+        """The sentence under the heading, naming the amount and the source."""
+        when = self.when(today)
+        on = self.due.strftime("%a %d %b")
+
+        if self.kind == "card":
+            # A card's amount is never known in advance, so promising one would
+            # be a lie. The date is the whole point.
+            where = " for " + self.source if self.source else ""
+            return "Payment" + where + " is due " + when + ", on " + on + "."
+
+        amount = "an unknown amount" if self.amount is None else "$" + format(self.amount, ",.2f")
+        where = " to " + self.source if self.source else ""
+        return "Charging " + amount + where + " " + when + ", on " + on + "."
+
+
+def due_reminders(
+    expenses: List[Expense],
+    cards: List[Card],
+    today: date,
+    days_ahead: int = 3,
+) -> List[Reminder]:
+    """Everything falling due exactly `days_ahead` days from `today`.
+
+    Exactly, not within, so a subscription is announced once rather than on
+    each of the three days before it bills.
+    """
+    if days_ahead < 0:
+        raise ValueError("days_ahead cannot be negative")
+
+    target = today + timedelta(days=days_ahead)
+    reminders: List[Reminder] = []
+
+    for expense in expenses:
+        if occurs_on(expense, target):
+            reminders.append(
+                Reminder(
+                    kind="subscription",
+                    record_id=expense.id,
+                    title=expense.description,
+                    due=target,
+                    amount=expense.amount,
+                    source=payment_source_name(cards, expense.paid_with),
+                )
+            )
+
+    for card in cards_only(cards):
+        if card_due_date(card, target.year, target.month) == target:
+            reminders.append(
+                Reminder(kind="card", record_id=card.id, title=card.name, due=target)
+            )
+
+    reminders.sort(key=lambda item: (item.kind, item.title.lower()))
+    return reminders
+
+
+def already_reminded(data_file: Path, reminder: Reminder) -> bool:
+    if data_file.suffix.lower() == ".json" or not data_file.exists():
+        return False
+    try:
+        with _connect(data_file) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM reminders_sent WHERE kind = ? AND record_id = ? AND due_on = ?",
+                (reminder.kind, reminder.record_id, reminder.due.isoformat()),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return row is not None
+
+
+def mark_reminded(data_file: Path, reminder: Reminder) -> None:
+    """Remember that this was announced, so it is not announced again."""
+    if data_file.suffix.lower() == ".json" or not data_file.exists():
+        return
+    with _connect(data_file) as connection:
+        connection.execute(
+            """
+            INSERT INTO reminders_sent (kind, record_id, due_on, sent_on)
+            VALUES (?, ?, ?, DATE('now'))
+            ON CONFLICT(kind, record_id, due_on) DO NOTHING
+            """,
+            (reminder.kind, reminder.record_id, reminder.due.isoformat()),
+        )
+
+
+def pending_reminders(
+    data_file: Path,
+    expenses: List[Expense],
+    cards: List[Card],
+    today: date,
+    days_ahead: int = 3,
+) -> List[Reminder]:
+    """Reminders that are due and have not been given yet."""
+    return [
+        reminder
+        for reminder in due_reminders(expenses, cards, today, days_ahead)
+        if not already_reminded(data_file, reminder)
+    ]
+
+
+def forget_old_reminders(data_file: Path, before: date) -> None:
+    """Drop records for dates long past, so the table cannot grow forever."""
+    if data_file.suffix.lower() == ".json" or not data_file.exists():
+        return
+    with _connect(data_file) as connection:
+        connection.execute("DELETE FROM reminders_sent WHERE due_on < ?", (before.isoformat(),))
 
 
 def get_card_year_totals(data_file: Path, year: int) -> dict:

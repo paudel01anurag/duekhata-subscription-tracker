@@ -8,9 +8,11 @@ import secrets
 import shutil
 import sys
 import tkinter as tk
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from tkinter import colorchooser, messagebox, ttk
+
+import notifier
 from tkinter import font as tkfont
 
 from tkcalendar import DateEntry
@@ -61,6 +63,17 @@ from expense_tracker import (
     set_card_payment,
     get_card_payments_for_year,
     get_card_year_totals,
+    forget_old_reminders,
+    mark_reminded,
+    pending_reminders,
+    reminder_days,
+    reminders_are_on,
+    set_setting,
+    get_setting,
+    REMINDERS_ENABLED,
+    REMINDER_DAYS,
+    REMINDER_TIME,
+    DEFAULT_REMINDER_DAYS,
     KIND_BANK,
     KIND_CARD,
     KIND_LABELS,
@@ -222,6 +235,7 @@ ICON_LIST = chr(0xE8FD)
 ICON_CALENDAR = chr(0xE787)
 ICON_STATS = chr(0xE9D9)
 ICON_EDIT = chr(0xE70F)
+ICON_BELL = chr(0xEA8F)
 ICON_CARD = chr(0xE8C7)
 
 # Fallback glyphs for machines without the icon font.
@@ -238,6 +252,7 @@ ICON_FALLBACK = {
     ICON_CALENDAR: "▤",
     ICON_STATS: "▓",
     ICON_EDIT: "✎",
+    ICON_BELL: "🔔",
     ICON_CARD: "▭",
 }
 
@@ -1597,9 +1612,14 @@ class ExpenseTrackerApp:
         self.user_canvas.grid(row=0, column=0, sticky="ew", padx=(0, SPACE_1))
         self.user_canvas.bind("<Configure>", lambda _event: self._draw_user())
 
+        self.reminder_button = IconButton(
+            footer, ICON_BELL, self.open_reminders_dialog, theme, variant="tonal"
+        )
+        self.reminder_button.grid(row=0, column=1, sticky="e", padx=(0, SPACE_2))
+
         self.theme_button = IconButton(footer, ICON_DARK_MODE, self.toggle_theme, theme, variant="tonal")
-        self.theme_button.grid(row=0, column=1, sticky="e")
-        self.themed_buttons.append(self.theme_button)
+        self.theme_button.grid(row=0, column=2, sticky="e")
+        self.themed_buttons.extend([self.theme_button, self.reminder_button])
 
     def _build_topbar(self, parent: tk.Frame, theme: dict) -> None:
         bar = tk.Frame(parent, bg=theme["background"])
@@ -1962,6 +1982,11 @@ class ExpenseTrackerApp:
         if not selection:
             return None
         return next((card for card in self.cards if card.id == selection[0]), None)
+
+    def open_reminders_dialog(self) -> None:
+        dialog = RemindersDialog(self.root, self.data_file, theme_mode=self.theme_mode.get())
+        dialog.grab_set()
+        self.root.wait_window(dialog)
 
     def open_add_card_dialog(self) -> None:
         self._open_card_dialog(None)
@@ -3183,6 +3208,202 @@ class ExpenseTrackerApp:
         self.root.wait_window(dialog)
 
 
+class RemindersDialog(tk.Toplevel):
+    """Turn desktop reminders on, and say how much warning you want.
+
+    Everything here is local. Switching this on asks Windows to run DueKhata
+    once a day, which looks at what is coming and raises a notification. No
+    email, no server, and nothing leaves the machine.
+    """
+
+    def __init__(
+        self,
+        master: tk.Tk,
+        data_file: Path,
+        theme_mode: str = "light",
+    ) -> None:
+        super().__init__(master)
+        self.data_file = data_file
+        self.theme = WARM_DARK if theme_mode == "dark" else WARM_LIGHT
+        self.title("Reminders")
+        self.configure(bg=self.theme["background"])
+        self.resizable(False, False)
+        self.columnconfigure(0, weight=1)
+
+        self.enabled_var = tk.BooleanVar(value=reminders_are_on(data_file))
+        self.days_var = tk.StringVar(value=str(reminder_days(data_file)))
+        self.time_var = tk.StringVar(value=get_setting(data_file, REMINDER_TIME, "09:00"))
+
+        tk.Label(
+            self,
+            text="Reminders",
+            bg=self.theme["background"],
+            fg=self.theme["text"],
+            font=display_font(16),
+        ).grid(row=0, column=0, sticky="w", padx=SPACE_5, pady=(SPACE_5, SPACE_2))
+
+        tk.Label(
+            self,
+            text=(
+                "Windows shows a notification before a subscription bills or a card falls due. "
+                "Nothing is emailed and nothing leaves this computer."
+            ),
+            bg=self.theme["background"],
+            fg=self.theme["text_muted"],
+            font=text_font(9),
+            justify="left",
+            wraplength=420,
+        ).grid(row=1, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_4))
+
+        ttk.Checkbutton(
+            self,
+            text="Remind me before a payment is due",
+            variable=self.enabled_var,
+            command=self._sync_state,
+        ).grid(row=2, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_3))
+
+        row = tk.Frame(self, bg=self.theme["background"])
+        row.grid(row=3, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_2))
+
+        tk.Label(
+            row, text="How much warning", bg=self.theme["background"],
+            fg=self.theme["text_secondary"], font=text_font(10),
+        ).grid(row=0, column=0, sticky="w", padx=(0, SPACE_3))
+        self.days_box = ttk.Combobox(
+            row, textvariable=self.days_var, state="readonly", width=12,
+            values=["on the day", "1 day", "2 days", "3 days", "5 days", "7 days"],
+        )
+        self.days_box.grid(row=0, column=1, sticky="w", padx=(0, SPACE_5))
+        self.days_box.set(self._days_label(reminder_days(data_file)))
+
+        tk.Label(
+            row, text="Check at", bg=self.theme["background"],
+            fg=self.theme["text_secondary"], font=text_font(10),
+        ).grid(row=0, column=2, sticky="w", padx=(0, SPACE_3))
+        self.time_box = ttk.Combobox(
+            row, textvariable=self.time_var, state="readonly", width=8,
+            values=["07:00", "08:00", "09:00", "12:00", "18:00", "21:00"],
+        )
+        self.time_box.grid(row=0, column=3, sticky="w")
+
+        self.status_label = tk.Label(
+            self,
+            text="",
+            bg=self.theme["background"],
+            fg=self.theme["text_muted"],
+            font=text_font(9),
+            justify="left",
+            wraplength=420,
+        )
+        self.status_label.grid(row=4, column=0, sticky="w", padx=SPACE_5, pady=(SPACE_2, SPACE_3))
+
+        actions = tk.Frame(self, bg=self.theme["background"])
+        actions.grid(row=5, column=0, sticky="e", padx=SPACE_5, pady=(SPACE_2, SPACE_5))
+        self.test_button = PillButton(
+            actions, "Show a test reminder", self.send_test, self.theme, variant="outlined"
+        )
+        self.test_button.grid(row=0, column=0, padx=(0, SPACE_2))
+        PillButton(actions, "Close", self.destroy, self.theme, variant="tonal").grid(
+            row=0, column=1, padx=(0, SPACE_2)
+        )
+        PillButton(actions, "Save", self.save, self.theme, variant="filled").grid(row=0, column=2)
+
+        self._sync_state()
+        if master is not None and master.winfo_viewable():
+            self.transient(master)
+
+    # --- days are stored as a number, shown as a phrase -------------------
+
+    DAY_LABELS = {
+        0: "on the day", 1: "1 day", 2: "2 days", 3: "3 days", 5: "5 days", 7: "7 days",
+    }
+
+    def _days_label(self, days: int) -> str:
+        return self.DAY_LABELS.get(days, "3 days")
+
+    def _selected_days(self) -> int:
+        chosen = self.days_box.get()
+        for days, label in self.DAY_LABELS.items():
+            if label == chosen:
+                return days
+        return DEFAULT_REMINDER_DAYS
+
+    def _sync_state(self) -> None:
+        on = self.enabled_var.get()
+        state = "readonly" if on else "disabled"
+        self.days_box.configure(state=state)
+        self.time_box.configure(state=state)
+
+        if not notifier.is_supported():
+            self.status_label.configure(
+                text="Desktop reminders need Windows, so they are unavailable here."
+            )
+            return
+
+        if not on:
+            self.status_label.configure(
+                text="Reminders are off. Nothing is scheduled and nothing runs in the background."
+            )
+            return
+
+        if notifier.is_scheduled():
+            self.status_label.configure(
+                text="Windows runs one check a day. It only fires while the computer is on — if it "
+                "is asleep at that hour, the check happens at the next opportunity."
+            )
+        else:
+            self.status_label.configure(
+                text="Press Save to ask Windows to run the daily check."
+            )
+
+    def send_test(self) -> None:
+        """Prove the notification actually appears, rather than assuming."""
+        if not notifier.is_supported():
+            messagebox.showinfo("Not available", "Desktop reminders need Windows.")
+            return
+        notifier.register_app_id()
+        shown = notifier.show_toast(
+            "Netflix Premium", "Charging $22.99 to Chase Freedom in 3 days, on Wed 26 Aug."
+        )
+        if shown:
+            self.status_label.configure(
+                text="A test reminder was sent. If nothing appeared, check Windows Settings → "
+                "System → Notifications, and that Focus Assist is not silencing it."
+            )
+        else:
+            messagebox.showwarning(
+                "It did not send",
+                "Windows would not show the notification. Reminders will not work until that is "
+                "sorted, but nothing else in DueKhata is affected.",
+            )
+
+    def save(self) -> None:
+        enabled = self.enabled_var.get()
+        set_setting(self.data_file, REMINDERS_ENABLED, "1" if enabled else "0")
+        set_setting(self.data_file, REMINDER_DAYS, str(self._selected_days()))
+        set_setting(self.data_file, REMINDER_TIME, self.time_var.get())
+
+        if not notifier.is_supported():
+            self.destroy()
+            return
+
+        if enabled:
+            notifier.register_app_id()
+            ok, message = notifier.schedule_daily_check(self.time_var.get())
+            if not ok:
+                messagebox.showwarning(
+                    "Reminders are on, but not scheduled",
+                    "Your preference was saved, but Windows would not create the daily task:\n\n"
+                    + message,
+                )
+                self.destroy()
+                return
+        else:
+            notifier.remove_scheduled_check()
+
+        self.destroy()
+
+
 class CardPaymentDialog(tk.Toplevel):
     """A whole year of one card's payments, in the application's own styling.
 
@@ -4025,7 +4246,49 @@ class AddExpenseDialog(tk.Toplevel):
         self.destroy()
 
 
+def run_due_check(argv=None) -> int:
+    """The daily reminder check, run headless by a scheduled task.
+
+    Builds no window and asks for no password. It reads the database, raises a
+    toast for anything falling due, records what it announced so the same
+    charge is never announced twice, and exits.
+    """
+    argv = list(sys.argv if argv is None else argv)
+    data_file = get_app_data_file()
+    create_schema(data_file)
+
+    if not reminders_are_on(data_file):
+        return 0
+
+    days = reminder_days(data_file)
+    if "--days" in argv:
+        try:
+            days = int(argv[argv.index("--days") + 1])
+        except (IndexError, ValueError):
+            pass
+
+    today = date.today()
+    reminders = pending_reminders(
+        data_file, load_expenses(data_file), load_cards(data_file), today, days
+    )
+    if not reminders:
+        return 0
+
+    notifier.register_app_id()
+    for reminder in reminders:
+        if notifier.show_toast(reminder.headline(), reminder.detail(today)):
+            # Only once it has actually been shown, so a failed toast is
+            # retried tomorrow rather than silently swallowed.
+            mark_reminded(data_file, reminder)
+
+    forget_old_reminders(data_file, today - timedelta(days=60))
+    return 0
+
+
 if __name__ == "__main__":
+    if "--check-due" in sys.argv:
+        sys.exit(run_due_check())
+
     root = tk.Tk()
     root.withdraw()
     resolve_fonts(root)
