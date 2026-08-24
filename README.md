@@ -35,8 +35,12 @@ Everything is stored locally. There is no account, no server, and no network acc
 - A start date and an optional end date, so cancelled subscriptions leave your forecast
 - Both figures that matter: what bills this month, and what your subscriptions cost per month on
   average, so a yearly renewal does not look like a mistake
-- Credit cards tracked for their due date and what was paid each month — never counted as
-  spending, because paying a card settles purchases that are already recorded
+- Credit cards and bank accounts tracked for their due date and what was paid each month — never
+  counted as spending, because paying a card settles purchases that are already recorded
+- Each subscription can say which card or bank account it is charged to, so replacing a card tells
+  you exactly what needs updating
+- Optional desktop reminders a few days before a payment is due, raised by Windows itself with no
+  network access and no account
 - Payments marked as paid per month, so last month's record survives into the next
 - Editing that preserves payment history
 - Search and filter the subscription list by name, category or billing rhythm
@@ -52,7 +56,7 @@ subscriptions, so counting the payment would count the same money twice.
 Each card shows what you paid this month against last month, so you can see whether the balance is
 going up or coming down, alongside the total paid on cards this year.
 
-![The Cards view, listing each card with its due date, what was paid this month and last, and the total paid this year](docs/cards.png)
+![The Cards view, listing credit cards and bank accounts side by side with their due dates, how many subscriptions are charged to each, what was paid this month and last, and the total paid this year](docs/cards.png)
 
 ## How repeat dates are worked out
 
