@@ -2180,7 +2180,18 @@ class ExpenseTrackerApp:
 
         controls = tk.Frame(view, bg=theme["background"])
         controls.grid(row=0, column=0, sticky="ew", pady=(0, SPACE_3))
-        controls.columnconfigure(2, weight=1)
+        controls.columnconfigure(3, weight=1)
+
+        # Which stretch of time the share panel covers. The chart above it is
+        # the year by definition, so this deliberately governs only the panel
+        # underneath, whose corner label always names the period in force.
+        self.period_control = SegmentedControl(
+            controls,
+            (("year", "This year"), ("month", "This month")),
+            self._set_breakdown_period,
+            theme,
+        )
+        self.period_control.grid(row=0, column=0, sticky="w", padx=(0, SPACE_3))
 
         # Two questions about the same money: what is it for, and where does it
         # come out. Both are groupings of the identical total, so they share one
@@ -2191,7 +2202,7 @@ class ExpenseTrackerApp:
             self._set_breakdown_field,
             theme,
         )
-        self.breakdown_control.grid(row=0, column=0, sticky="w", padx=(0, SPACE_3))
+        self.breakdown_control.grid(row=0, column=1, sticky="w", padx=(0, SPACE_3))
 
         self.style_control = SegmentedControl(
             controls,
@@ -2199,8 +2210,10 @@ class ExpenseTrackerApp:
             self._set_chart_style,
             theme,
         )
-        self.style_control.grid(row=0, column=1, sticky="w")
-        self.themed_buttons.extend([self.breakdown_control, self.style_control])
+        self.style_control.grid(row=0, column=2, sticky="w")
+        self.themed_buttons.extend(
+            [self.period_control, self.breakdown_control, self.style_control]
+        )
 
         self.trend_canvas = tk.Canvas(view, bg=theme["background"], highlightthickness=0)
         self.trend_canvas.grid(row=1, column=0, sticky="nsew")
@@ -2470,29 +2483,34 @@ class ExpenseTrackerApp:
         year = self.current_date.year
         by_source = getattr(self, "breakdown_field", "category") == "source"
         heading = "SHARE BY CARD OR ACCOUNT" if by_source else "SHARE BY CATEGORY"
-        box = self._draw_card(self.breakdown_canvas, heading, f"{year} TOTAL")
+        box = self._draw_card(self.breakdown_canvas, heading, self._breakdown_period_label())
         if box == (0, 0, 0, 0):
             return
         theme = self._theme()
         left, top, right, bottom = box
         canvas = self.breakdown_canvas
 
-        yearly: dict = {}
-        for month in range(1, 13):
-            monthly = (
+        months = (
+            [self.current_date.month]
+            if getattr(self, "breakdown_period", "year") == "month"
+            else list(range(1, 13))
+        )
+        gathered: dict = {}
+        for month in months:
+            for name, value in (
                 get_source_totals(self.expenses, self.cards, year, month)
                 if by_source
                 else get_totals_by(self.expenses, year, month)
-            )
-            for name, value in monthly:
-                yearly[name] = yearly.get(name, 0.0) + value
-        rows = sorted(yearly.items(), key=lambda item: -item[1])
+            ):
+                gathered[name] = gathered.get(name, 0.0) + value
+        rows = sorted(gathered.items(), key=lambda item: -item[1])
         total = sum(value for _name, value in rows)
 
         if not rows or total <= 0:
             canvas.create_text(
-                left, top + 8, text="No spending recorded for this year yet.", anchor="nw",
-                fill=theme["text_muted"], font=text_font(10),
+                left, top + 8,
+                text="Nothing recorded for " + self._breakdown_period_caption().lower() + " yet.",
+                anchor="nw", fill=theme["text_muted"], font=text_font(10),
             )
             return
 
@@ -2513,18 +2531,31 @@ class ExpenseTrackerApp:
             extent = -(value / total) * 360.0
             if abs(extent) < 0.2:
                 continue
-            canvas.create_arc(
-                cx - radius, cy - radius, cx + radius, cy + radius,
-                start=start, extent=extent, style="pieslice",
-                fill=CATEGORY_COLOURS[index % len(CATEGORY_COLOURS)], outline=theme["surface"],
-            )
+            colour = CATEGORY_COLOURS[index % len(CATEGORY_COLOURS)]
+            if abs(extent) >= 359.95:
+                # Tk draws nothing for an arc of a full circle — it treats 360
+                # as 0 — so one slice worth 100% left the chart blank. Draw the
+                # circle itself instead.
+                canvas.create_oval(
+                    cx - radius, cy - radius, cx + radius, cy + radius,
+                    fill=colour, outline=theme["surface"],
+                )
+            else:
+                canvas.create_arc(
+                    cx - radius, cy - radius, cx + radius, cy + radius,
+                    start=start, extent=extent, style="pieslice",
+                    fill=colour, outline=theme["surface"],
+                )
             start += extent
 
         # The hole is what makes it a donut, and gives the total somewhere to live.
         hole = int(radius * 0.58)
         canvas.create_oval(cx - hole, cy - hole, cx + hole, cy + hole, fill=theme["surface"], outline="")
         canvas.create_text(cx, cy - 8, text=f"${total:,.0f}", fill=theme["text"], font=display_font(15))
-        canvas.create_text(cx, cy + 10, text="THIS YEAR", fill=theme["text_muted"], font=text_font(7, bold=True))
+        canvas.create_text(
+            cx, cy + 10, text=self._breakdown_period_caption(),
+            fill=theme["text_muted"], font=text_font(7, bold=True),
+        )
 
         # Keep the legend as one block beside the donut. Pinning the figures to
         # the card edge instead leaves a gulf of empty space on a wide window.
@@ -2678,6 +2709,22 @@ class ExpenseTrackerApp:
 
     def _available_categories(self) -> list[str]:
         return sorted({expense.category for expense in self.expenses if expense.category})
+
+    def _breakdown_period_label(self) -> str:
+        """The corner of the panel, which always names the period in force."""
+        if getattr(self, "breakdown_period", "year") == "month":
+            return self.current_date.strftime("%B %Y").upper()
+        return str(self.current_date.year) + " TOTAL"
+
+    def _breakdown_period_caption(self) -> str:
+        """The small line under the figure in the middle of the donut."""
+        if getattr(self, "breakdown_period", "year") == "month":
+            return self.current_date.strftime("%B").upper()
+        return "THIS YEAR"
+
+    def _set_breakdown_period(self, period: str) -> None:
+        self.breakdown_period = period
+        self._draw_breakdown()
 
     def _set_breakdown_field(self, field: str) -> None:
         self.breakdown_field = field
