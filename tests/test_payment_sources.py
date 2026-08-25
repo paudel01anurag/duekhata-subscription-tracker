@@ -14,6 +14,8 @@ from expense_tracker import (
     create_card,
     create_expense,
     create_schema,
+    get_category_totals,
+    get_source_totals,
     delete_card,
     expenses_charged_to,
     find_card,
@@ -239,3 +241,59 @@ class PaymentSourceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SourceTotalsTests(unittest.TestCase):
+    """Spending grouped by where it is charged."""
+
+    def setUp(self) -> None:
+        self.chase = create_card("Chase Freedom", 15)
+        self.bank = create_card("NIC Asia Savings", kind=KIND_BANK)
+        self.cards = [self.chase, self.bank]
+        self.expenses = [
+            create_expense("Netflix", 22.99, "2026-01-03", category="Streaming",
+                           cadence=CADENCE_MONTHLY, due_day=3, paid_with=self.chase.id),
+            create_expense("Adobe", 59.99, "2026-01-12", category="Software",
+                           cadence=CADENCE_MONTHLY, due_day=12, paid_with=self.bank.id),
+            create_expense("Gym", 45.00, "2026-01-18", category="Health",
+                           cadence=CADENCE_MONTHLY, due_day=18),
+        ]
+
+    def test_spending_is_grouped_by_payment_source(self) -> None:
+        totals = dict(get_source_totals(self.expenses, self.cards, 2026, 9))
+        self.assertEqual(totals["Chase Freedom"], 22.99)
+        self.assertEqual(totals["NIC Asia Savings"], 59.99)
+
+    def test_bank_accounts_are_included_alongside_cards(self) -> None:
+        names = [name for name, _value in get_source_totals(self.expenses, self.cards, 2026, 9)]
+        self.assertIn("NIC Asia Savings", names)
+
+    def test_unassigned_spending_is_gathered_not_dropped(self) -> None:
+        """Otherwise the shares would not add up to the month, and quietly so."""
+        totals = dict(get_source_totals(self.expenses, self.cards, 2026, 9))
+        self.assertEqual(totals["Not set"], 45.00)
+
+    def test_it_totals_the_same_money_as_grouping_by_category(self) -> None:
+        by_category = sum(value for _n, value in get_category_totals(self.expenses, 2026, 9))
+        by_source = sum(value for _n, value in get_source_totals(self.expenses, self.cards, 2026, 9))
+        self.assertAlmostEqual(by_category, by_source, places=2)
+
+    def test_largest_first(self) -> None:
+        ranked = get_source_totals(self.expenses, self.cards, 2026, 9)
+        self.assertEqual([value for _n, value in ranked], sorted(
+            [value for _n, value in ranked], reverse=True))
+
+    def test_a_paused_subscription_is_not_charged_to_anything(self) -> None:
+        self.expenses[0].paused = True
+        totals = dict(get_source_totals(self.expenses, self.cards, 2026, 9))
+        self.assertNotIn("Chase Freedom", totals)
+
+    def test_card_payments_never_reach_this_chart(self) -> None:
+        """The point of the whole cards design: settlement is not spending."""
+        data_file = Path(tempfile.mkdtemp()) / "expenses.db"
+        create_schema(data_file)
+        save_card(data_file, self.chase)
+        set_card_payment(data_file, self.chase.id, 2026, 9, 900.00)
+
+        totals = dict(get_source_totals(self.expenses, self.cards, 2026, 9))
+        self.assertEqual(totals["Chase Freedom"], 22.99)

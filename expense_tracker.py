@@ -1264,6 +1264,37 @@ def get_totals_by(
     return ranked
 
 
+def get_source_totals(
+    expenses: List[Expense],
+    cards: List[Card],
+    year: int,
+    month: int,
+    unassigned: str = "Not set",
+) -> List[tuple]:
+    """One month's spending grouped by which card or account it is charged to.
+
+    This is deliberately built from the **subscriptions**, not from what was
+    paid to each card. A card payment settles purchases that are already
+    recorded here, so charting those as spending would count the same money
+    twice — the rule the cards half of the application exists to keep. What is
+    on this chart is real spending, attributed to where it comes out.
+
+    Subscriptions with no payment source are gathered under `unassigned` rather
+    than dropped, so the shares always add up to the month's total.
+    """
+    totals: dict = {}
+    for expense in get_expenses_for_month(expenses, year, month):
+        if expense.amount is None:
+            continue
+        occurrences = len(occurrences_in_month(expense, year, month))
+        name = payment_source_name(cards, expense.paid_with) or unassigned
+        totals[name] = totals.get(name, 0.0) + expense.amount * occurrences
+
+    ranked = [(name, round(value, 2)) for name, value in totals.items()]
+    ranked.sort(key=lambda item: (-item[1], item[0].lower()))
+    return ranked
+
+
 def get_category_totals(expenses: List[Expense], year: int, month: int) -> List[tuple]:
     return get_totals_by(expenses, year, month, "category")
 

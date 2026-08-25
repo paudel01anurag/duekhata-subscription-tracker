@@ -27,6 +27,7 @@ from expense_tracker import (
     next_occurrence,
     get_category_totals,
     get_totals_by,
+    get_source_totals,
     get_monthly_totals,
     get_upcoming,
     CADENCE_LABELS,
@@ -2179,7 +2180,18 @@ class ExpenseTrackerApp:
 
         controls = tk.Frame(view, bg=theme["background"])
         controls.grid(row=0, column=0, sticky="ew", pady=(0, SPACE_3))
-        controls.columnconfigure(1, weight=1)
+        controls.columnconfigure(2, weight=1)
+
+        # Two questions about the same money: what is it for, and where does it
+        # come out. Both are groupings of the identical total, so they share one
+        # chart rather than becoming two panels.
+        self.breakdown_control = SegmentedControl(
+            controls,
+            (("category", "By category"), ("source", "By card")),
+            self._set_breakdown_field,
+            theme,
+        )
+        self.breakdown_control.grid(row=0, column=0, sticky="w", padx=(0, SPACE_3))
 
         self.style_control = SegmentedControl(
             controls,
@@ -2187,8 +2199,8 @@ class ExpenseTrackerApp:
             self._set_chart_style,
             theme,
         )
-        self.style_control.grid(row=0, column=0, sticky="w")
-        self.themed_buttons.append(self.style_control)
+        self.style_control.grid(row=0, column=1, sticky="w")
+        self.themed_buttons.extend([self.breakdown_control, self.style_control])
 
         self.trend_canvas = tk.Canvas(view, bg=theme["background"], highlightthickness=0)
         self.trend_canvas.grid(row=1, column=0, sticky="nsew")
@@ -2456,7 +2468,8 @@ class ExpenseTrackerApp:
         if not hasattr(self, "breakdown_canvas"):
             return
         year = self.current_date.year
-        heading = "SHARE BY CATEGORY"
+        by_source = getattr(self, "breakdown_field", "category") == "source"
+        heading = "SHARE BY CARD OR ACCOUNT" if by_source else "SHARE BY CATEGORY"
         box = self._draw_card(self.breakdown_canvas, heading, f"{year} TOTAL")
         if box == (0, 0, 0, 0):
             return
@@ -2466,7 +2479,12 @@ class ExpenseTrackerApp:
 
         yearly: dict = {}
         for month in range(1, 13):
-            for name, value in get_totals_by(self.expenses, year, month):
+            monthly = (
+                get_source_totals(self.expenses, self.cards, year, month)
+                if by_source
+                else get_totals_by(self.expenses, year, month)
+            )
+            for name, value in monthly:
                 yearly[name] = yearly.get(name, 0.0) + value
         rows = sorted(yearly.items(), key=lambda item: -item[1])
         total = sum(value for _name, value in rows)
@@ -2660,6 +2678,10 @@ class ExpenseTrackerApp:
 
     def _available_categories(self) -> list[str]:
         return sorted({expense.category for expense in self.expenses if expense.category})
+
+    def _set_breakdown_field(self, field: str) -> None:
+        self.breakdown_field = field
+        self._draw_breakdown()
 
     def _set_chart_style(self, style: str) -> None:
         self.chart_style = style
