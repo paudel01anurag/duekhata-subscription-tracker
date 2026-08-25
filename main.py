@@ -6,11 +6,12 @@ import hmac
 import os
 import secrets
 import shutil
+import sqlite3
 import sys
 import tkinter as tk
 from datetime import date, timedelta
 from pathlib import Path
-from tkinter import colorchooser, messagebox, ttk
+from tkinter import colorchooser, filedialog, messagebox, ttk
 
 import notifier
 from tkinter import font as tkfont
@@ -61,6 +62,13 @@ from expense_tracker import (
     load_cards,
     save_card,
     set_card_payment,
+    backup_database,
+    backup_file_name,
+    describe_backup,
+    restore_database,
+    export_subscriptions_csv,
+    export_cards_csv,
+    export_card_payments_csv,
     get_card_payments_for_year,
     get_card_year_totals,
     forget_old_reminders,
@@ -237,6 +245,7 @@ ICON_STATS = chr(0xE9D9)
 ICON_EDIT = chr(0xE70F)
 ICON_BELL = chr(0xEA8F)
 ICON_CARD = chr(0xE8C7)
+ICON_SAVE = chr(0xE74E)
 
 # Fallback glyphs for machines without the icon font.
 ICON_FALLBACK = {
@@ -254,6 +263,7 @@ ICON_FALLBACK = {
     ICON_EDIT: "✎",
     ICON_BELL: "🔔",
     ICON_CARD: "▭",
+    ICON_SAVE: "🖫",
 }
 
 # 4px base grid.
@@ -1612,14 +1622,19 @@ class ExpenseTrackerApp:
         self.user_canvas.grid(row=0, column=0, sticky="ew", padx=(0, SPACE_1))
         self.user_canvas.bind("<Configure>", lambda _event: self._draw_user())
 
+        self.backup_button = IconButton(
+            footer, ICON_SAVE, self.open_backup_dialog, theme, variant="tonal"
+        )
+        self.backup_button.grid(row=0, column=1, sticky="e", padx=(0, SPACE_2))
+
         self.reminder_button = IconButton(
             footer, ICON_BELL, self.open_reminders_dialog, theme, variant="tonal"
         )
-        self.reminder_button.grid(row=0, column=1, sticky="e", padx=(0, SPACE_2))
+        self.reminder_button.grid(row=0, column=2, sticky="e", padx=(0, SPACE_2))
 
         self.theme_button = IconButton(footer, ICON_DARK_MODE, self.toggle_theme, theme, variant="tonal")
-        self.theme_button.grid(row=0, column=2, sticky="e")
-        self.themed_buttons.extend([self.theme_button, self.reminder_button])
+        self.theme_button.grid(row=0, column=3, sticky="e")
+        self.themed_buttons.extend([self.theme_button, self.reminder_button, self.backup_button])
 
     def _build_topbar(self, parent: tk.Frame, theme: dict) -> None:
         bar = tk.Frame(parent, bg=theme["background"])
@@ -1982,6 +1997,14 @@ class ExpenseTrackerApp:
         if not selection:
             return None
         return next((card for card in self.cards if card.id == selection[0]), None)
+
+    def open_backup_dialog(self) -> None:
+        dialog = BackupDialog(
+            self.root, self.data_file, self.refresh_view,
+            theme_mode=self.theme_mode.get(),
+        )
+        dialog.grab_set()
+        self.root.wait_window(dialog)
 
     def open_reminders_dialog(self) -> None:
         dialog = RemindersDialog(self.root, self.data_file, theme_mode=self.theme_mode.get())
@@ -3206,6 +3229,230 @@ class ExpenseTrackerApp:
         )
         dialog.grab_set()
         self.root.wait_window(dialog)
+
+
+class BackupDialog(tk.Toplevel):
+    """Keep a copy of everything, put one back, or write it out to read.
+
+    Two different jobs sit here and the wording works hard to keep them apart. A
+    backup restores everything and is readable by nothing but this application.
+    A CSV is for a person to read and deliberately does not come back in — it
+    carries no payment history — so anyone treating it as their safety net is
+    told otherwise before they rely on it.
+    """
+
+    def __init__(
+        self,
+        master: tk.Tk,
+        data_file: Path,
+        refresh_callback,
+        theme_mode: str = "light",
+    ) -> None:
+        super().__init__(master)
+        self.data_file = data_file
+        self.refresh_callback = refresh_callback
+        self.theme = WARM_DARK if theme_mode == "dark" else WARM_LIGHT
+        self.title("Backup and export")
+        self.configure(bg=self.theme["background"])
+        self.resizable(False, False)
+        self.columnconfigure(0, weight=1)
+
+        tk.Label(
+            self, text="Backup and export", bg=self.theme["background"],
+            fg=self.theme["text"], font=display_font(16),
+        ).grid(row=0, column=0, sticky="w", padx=SPACE_5, pady=(SPACE_5, SPACE_2))
+
+        tk.Label(
+            self,
+            text=(
+                "Everything you have entered lives in one file on this computer. There is no copy "
+                "anywhere else, so if that file goes, it is gone."
+            ),
+            bg=self.theme["background"], fg=self.theme["text_muted"],
+            font=text_font(9), justify="left", wraplength=440,
+        ).grid(row=1, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_4))
+
+        # --- backup ------------------------------------------------------
+        self._heading("Back up", 2)
+        self._explain(
+            "A complete copy: subscriptions, cards, every month marked paid, and your settings. "
+            "This is the one that puts everything back.",
+            3,
+        )
+        backup_row = tk.Frame(self, bg=self.theme["background"])
+        backup_row.grid(row=4, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_4))
+        PillButton(
+            backup_row, "Back up now", self.back_up, self.theme, variant="filled", glyph=ICON_SAVE
+        ).pack(side="left", padx=(0, SPACE_2))
+        PillButton(
+            backup_row, "Restore from a backup", self.restore, self.theme, variant="outlined"
+        ).pack(side="left")
+
+        # --- export ------------------------------------------------------
+        self._heading("Export to a spreadsheet", 5)
+        self._explain(
+            "A CSV you can open in Excel or keep somewhere readable. It holds what you pay and "
+            "when, but not which months you marked paid — so it is for reading, not for putting "
+            "back. Use a backup for that.",
+            6,
+        )
+        export_row = tk.Frame(self, bg=self.theme["background"])
+        export_row.grid(row=7, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_4))
+        PillButton(
+            export_row, "Subscriptions", self.export_subscriptions, self.theme, variant="tonal"
+        ).pack(side="left", padx=(0, SPACE_2))
+        PillButton(
+            export_row, "Cards", self.export_cards, self.theme, variant="tonal"
+        ).pack(side="left", padx=(0, SPACE_2))
+        PillButton(
+            export_row, "Card payments", self.export_payments, self.theme, variant="tonal"
+        ).pack(side="left")
+
+        self.status_label = tk.Label(
+            self, text="", bg=self.theme["background"], fg=self.theme["text_secondary"],
+            font=text_font(9), justify="left", wraplength=440,
+        )
+        self.status_label.grid(row=8, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_2))
+
+        actions = tk.Frame(self, bg=self.theme["background"])
+        actions.grid(row=9, column=0, sticky="e", padx=SPACE_5, pady=(SPACE_2, SPACE_5))
+        PillButton(actions, "Close", self.destroy, self.theme, variant="tonal").pack(side="right")
+
+        if master is not None and master.winfo_viewable():
+            self.transient(master)
+
+    # --- small builders --------------------------------------------------
+
+    def _heading(self, text: str, row: int) -> None:
+        tk.Label(
+            self, text=text, bg=self.theme["background"], fg=self.theme["text"],
+            font=text_font(11, bold=True),
+        ).grid(row=row, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_1))
+
+    def _explain(self, text: str, row: int) -> None:
+        tk.Label(
+            self, text=text, bg=self.theme["background"], fg=self.theme["text_muted"],
+            font=text_font(9), justify="left", wraplength=440,
+        ).grid(row=row, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_2))
+
+    def _say(self, message: str) -> None:
+        self.status_label.config(text=message)
+
+    # --- actions ---------------------------------------------------------
+
+    def back_up(self) -> None:
+        destination = filedialog.asksaveasfilename(
+            parent=self,
+            title="Save a backup",
+            initialfile=backup_file_name(),
+            defaultextension=".db",
+            filetypes=[("DueKhata backup", "*.db"), ("All files", "*.*")],
+        )
+        if not destination:
+            return
+        try:
+            written = backup_database(self.data_file, Path(destination))
+        except (OSError, FileNotFoundError, sqlite3.Error) as error:
+            messagebox.showerror("Could not back up", str(error), parent=self)
+            return
+
+        summary = describe_backup(written)
+        self._say(
+            "Backed up " + str(summary["subscriptions"]) + " subscriptions and "
+            + str(summary["cards"]) + " payment sources to " + written.name + "."
+        )
+
+    def restore(self) -> None:
+        chosen = filedialog.askopenfilename(
+            parent=self,
+            title="Choose a backup to restore",
+            filetypes=[("DueKhata backup", "*.db"), ("All files", "*.*")],
+        )
+        if not chosen:
+            return
+
+        # Say what is in the file before asking, so the decision is informed
+        # rather than a guess from a filename.
+        try:
+            summary = describe_backup(Path(chosen))
+        except (ValueError, FileNotFoundError, OSError) as error:
+            messagebox.showerror("That is not a backup", str(error), parent=self)
+            return
+
+        confirmed = messagebox.askyesno(
+            "Restore this backup?",
+            "That backup holds " + str(summary["subscriptions"]) + " subscriptions, "
+            + str(summary["cards"]) + " payment sources and "
+            + str(summary["payments"]) + " recorded payments."
+            + chr(10) + chr(10)
+            + "Restoring replaces everything currently in DueKhata with it."
+            + chr(10) + chr(10)
+            + "What you have now is kept as a file beside your database, so this can be undone.",
+            parent=self,
+        )
+        if not confirmed:
+            return
+
+        try:
+            displaced = restore_database(Path(chosen), self.data_file)
+        except (ValueError, OSError, sqlite3.Error) as error:
+            messagebox.showerror("Could not restore", str(error), parent=self)
+            return
+
+        self.refresh_callback()
+        kept = ("" if displaced is None else
+                " What you had before is kept as " + displaced.name + ".")
+        messagebox.showinfo(
+            "Restored",
+            "DueKhata now holds what was in that backup." + kept,
+            parent=self,
+        )
+        self._say("Restored from " + Path(chosen).name + ".")
+
+    def _ask_csv(self, suggested: str):
+        chosen = filedialog.asksaveasfilename(
+            parent=self,
+            title="Export to CSV",
+            initialfile=suggested,
+            defaultextension=".csv",
+            filetypes=[("Spreadsheet", "*.csv"), ("All files", "*.*")],
+        )
+        return Path(chosen) if chosen else None
+
+    def export_subscriptions(self) -> None:
+        destination = self._ask_csv("DueKhata subscriptions " + date.today().isoformat() + ".csv")
+        if destination is None:
+            return
+        try:
+            expenses = load_expenses(self.data_file)
+            written = export_subscriptions_csv(expenses, load_cards(self.data_file), destination)
+        except OSError as error:
+            messagebox.showerror("Could not export", str(error), parent=self)
+            return
+        self._say("Wrote " + str(len(expenses)) + " subscriptions to " + written.name + ".")
+
+    def export_cards(self) -> None:
+        destination = self._ask_csv("DueKhata cards " + date.today().isoformat() + ".csv")
+        if destination is None:
+            return
+        try:
+            cards = load_cards(self.data_file)
+            written = export_cards_csv(cards, destination)
+        except OSError as error:
+            messagebox.showerror("Could not export", str(error), parent=self)
+            return
+        self._say("Wrote " + str(len(cards)) + " payment sources to " + written.name + ".")
+
+    def export_payments(self) -> None:
+        destination = self._ask_csv("DueKhata card payments " + date.today().isoformat() + ".csv")
+        if destination is None:
+            return
+        try:
+            written = export_card_payments_csv(self.data_file, destination)
+        except OSError as error:
+            messagebox.showerror("Could not export", str(error), parent=self)
+            return
+        self._say("Wrote every recorded card payment to " + written.name + ".")
 
 
 class RemindersDialog(tk.Toplevel):

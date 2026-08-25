@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import csv
 import json
 import secrets
 import sqlite3
@@ -1410,3 +1411,243 @@ def get_upcoming(expenses: List[Expense], start: date, days: int = 7) -> List[tu
 
 def remove_expense(expenses: List[Expense], expense_id: str) -> List[Expense]:
     return [expense for expense in expenses if expense.id != expense_id]
+
+
+# --- backup, restore and export ------------------------------------------
+#
+# There are two different jobs here and conflating them loses data.
+#
+# A **backup** is the whole database, byte for byte, and is the only thing that
+# restores everything: subscriptions, cards, every month marked paid, the login,
+# the settings. It is not readable by anything but this application.
+#
+# An **export** is a CSV for a person to read, open in a spreadsheet, or keep
+# somewhere legible in twenty years. It deliberately does not round-trip: it
+# holds no identifiers and no payment history, so importing one back would
+# silently lose things. Anyone relying on CSV as their safety net has the wrong
+# idea, which is why the interface says so plainly.
+
+
+BACKUP_SUFFIX = ".duekhata-backup.db"
+
+
+def backup_file_name(today: Optional[date] = None) -> str:
+    """A name that sorts chronologically and says what it is."""
+    stamp = (today or date.today()).isoformat()
+    return "DueKhata " + stamp + BACKUP_SUFFIX
+
+
+def backup_database(data_file: Path, destination: Path) -> Path:
+    """Copy the database to `destination`, safely, and return where it landed.
+
+    Uses SQLite's own backup API rather than copying the file. A plain file copy
+    of a database that is open can capture a partially written page, producing a
+    backup that looks fine until the day it is needed. The backup API takes a
+    consistent snapshot even while the application is using the database.
+    """
+    if not data_file.exists():
+        raise FileNotFoundError("there is no database to back up yet")
+
+    destination = Path(destination)
+    if destination.is_dir():
+        destination = destination / backup_file_name()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    source = sqlite3.connect(data_file)
+    try:
+        target = sqlite3.connect(destination)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+    finally:
+        source.close()
+    return destination
+
+
+def describe_backup(path: Path) -> dict:
+    """What is in a backup file, without trusting its name.
+
+    Called before restoring so the user is told what they are about to replace
+    their data with, and so a file that is not a DueKhata backup is refused
+    rather than copied over the top of everything.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError("that file does not exist")
+
+    try:
+        connection = sqlite3.connect("file:" + str(path) + "?mode=ro", uri=True)
+    except sqlite3.OperationalError as error:
+        raise ValueError("that file cannot be opened as a database") from error
+
+    try:
+        connection.row_factory = sqlite3.Row
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if "expenses" not in tables:
+            raise ValueError("that database is not a DueKhata backup")
+
+        def count(table: str) -> int:
+            if table not in tables:
+                return 0
+            return connection.execute("SELECT COUNT(*) FROM " + table).fetchone()[0]
+
+        return {
+            "subscriptions": count("expenses"),
+            "cards": count("cards"),
+            "payments": count("expense_payments") + count("card_payments"),
+            "size": path.stat().st_size,
+        }
+    except sqlite3.DatabaseError as error:
+        raise ValueError("that file is not a readable database") from error
+    finally:
+        connection.close()
+
+
+def restore_database(backup_path: Path, data_file: Path) -> Path:
+    """Replace the live database with a backup, keeping the old one.
+
+    The displaced database is written beside the live one with a `.replaced-`
+    prefix and its path returned. Restoring is the one irreversible-looking
+    action in the application, so it is made reversible: if someone restores the
+    wrong file, what they had is still on disk.
+    """
+    backup_path = Path(backup_path)
+    data_file = Path(data_file)
+
+    # Refuses anything that is not a DueKhata database, before touching a thing.
+    describe_backup(backup_path)
+
+    displaced = None
+    if data_file.exists():
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        displaced = data_file.with_name("replaced-" + stamp + "-" + data_file.name)
+        source = sqlite3.connect(data_file)
+        try:
+            target = sqlite3.connect(displaced)
+            try:
+                source.backup(target)
+            finally:
+                target.close()
+        finally:
+            source.close()
+
+    data_file.parent.mkdir(parents=True, exist_ok=True)
+    source = sqlite3.connect(backup_path)
+    try:
+        target = sqlite3.connect(data_file)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+    finally:
+        source.close()
+
+    return displaced
+
+
+SUBSCRIPTION_CSV_HEADER = (
+    "Description",
+    "Amount",
+    "Repeats",
+    "Per month",
+    "Starts",
+    "Ends",
+    "Next due",
+    "Category",
+    "Charged to",
+)
+
+
+def export_subscriptions_csv(
+    expenses: List[Expense],
+    cards: List[Card],
+    destination: Path,
+    today: Optional[date] = None,
+) -> Path:
+    """Write the subscriptions as a spreadsheet a person can read.
+
+    Column headings are the ones used in the application, not the database's
+    field names, because the audience is whoever opens the file rather than
+    whoever wrote the schema.
+    """
+    today = today or date.today()
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    # newline="" is required or the csv module writes blank lines on Windows.
+    with destination.open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(SUBSCRIPTION_CSV_HEADER)
+        for expense in sorted(expenses, key=lambda item: item.description.lower()):
+            following = next_occurrence(expense, today)
+            writer.writerow(
+                [
+                    expense.description,
+                    "" if expense.amount is None else format(expense.amount, ".2f"),
+                    CADENCE_LABELS.get(expense.cadence, expense.cadence or ""),
+                    format(monthly_equivalent(expense), ".2f"),
+                    expense.date or "",
+                    expense.ends_on or "",
+                    following.isoformat() if following else "",
+                    expense.category,
+                    payment_source_name(cards, expense.paid_with),
+                ]
+            )
+    return destination
+
+
+CARD_CSV_HEADER = ("Name", "Kind", "Due day", "Notes")
+
+
+def export_cards_csv(cards: List[Card], destination: Path) -> Path:
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(CARD_CSV_HEADER)
+        for card in sorted(cards, key=lambda item: (item.kind != KIND_CARD, item.name.lower())):
+            writer.writerow(
+                [
+                    card.name,
+                    KIND_LABELS.get(card.kind, card.kind),
+                    "" if card.due_day is None else str(card.due_day),
+                    card.notes,
+                ]
+            )
+    return destination
+
+
+PAYMENT_CSV_HEADER = ("Card", "Year", "Month", "Amount", "Recorded on")
+
+
+def export_card_payments_csv(data_file: Path, destination: Path) -> Path:
+    """Every card payment ever recorded, newest first."""
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    rows = []
+    if data_file.exists() and data_file.suffix.lower() != ".json":
+        try:
+            with _connect(data_file) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT c.name, p.paid_year, p.paid_month, p.amount, p.paid_on
+                    FROM card_payments p
+                    JOIN cards c ON c.id = p.card_id
+                    ORDER BY p.paid_year DESC, p.paid_month DESC, c.name
+                    """
+                ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+
+    with destination.open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(PAYMENT_CSV_HEADER)
+        for name, year, month, amount, paid_on in rows:
+            writer.writerow([name, year, month, format(amount, ".2f"), paid_on])
+    return destination
