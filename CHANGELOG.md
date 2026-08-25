@@ -3,6 +3,33 @@
 What changed in each version. Newest first. Every version can be downloaded from the
 [releases page](https://github.com/paudel01anurag/duekhata-subscription-tracker/releases).
 
+## v3.4.0 — 24 August 2026
+
+Subscriptions can say where they are charged, and DueKhata can tell you before a payment lands.
+
+**Added**
+
+- **Payment sources.** A subscription can now record which card or bank account it is charged to.
+  Bank accounts live alongside cards, and each payment source shows how many subscriptions it carries
+  and what they cost per month — so when a card is replaced, the list of what to update is on screen.
+- **Reminders.** DueKhata can raise a Windows notification a few days before a payment is due, naming
+  the amount and the card it will be charged to. Off by default; the bell in the sidebar switches it
+  on and chooses how much warning and at what time.
+
+  It works without the application running: Windows Task Scheduler starts a check once a day, which
+  raises anything due and exits. Nothing runs in the background, and nothing reaches the network.
+
+**Fixed**
+
+- The "Charged to" dropdown was invisible, because it shared a grid cell with the "Mark as paid this
+  month" checkbox and was drawn underneath it.
+- Record identifiers were built from the clock alone, so two records created in the same instant
+  could share one. Since payments are matched to their subscription by identifier, that meant marking
+  one paid could mark another, and deleting one could delete another. Found by continuous integration
+  on its first run, having never once reproduced locally.
+- Reminders lost the dollar amount, announcing "Charging .99" instead of "Charging $22.99", because
+  PowerShell expanded `$22` as a variable on the way to the notification.
+
 ## v3.3.0 — 21 August 2026
 
 Credit cards get their own place, the dashboard stops making a yearly renewal look like a mistake,
