@@ -3,6 +3,39 @@
 What changed in each version. Newest first. Every version can be downloaded from the
 [releases page](https://github.com/paudel01anurag/duekhata-subscription-tracker/releases).
 
+## v3.5.0 — 25 August 2026
+
+Your data can leave the machine it lives on, a subscription can be paused rather than deleted, and
+the cards you have entered are finally visible as a picture.
+
+**Added**
+
+- **Backup, restore and export**, behind the save icon in the sidebar. A backup is the whole
+  database and puts everything back, including which months you marked paid. Restoring keeps what it
+  replaced, so restoring the wrong file can be undone, and a file that is not a DueKhata database is
+  refused before anything is overwritten. The CSV export beside it is for reading in a spreadsheet
+  and deliberately does not come back in.
+- **Pausing.** A frozen gym membership can be stopped without ending or deleting it: nothing bills,
+  nothing appears on the calendar, no reminder is raised, and the monthly average drops. Its history
+  is kept and one tick brings it back.
+- **Sorting by clicking a column heading**, in the subscriptions list and in Cards & banks. Click to
+  sort, click again to reverse. No new controls were added; the headings that were already there
+  became the way to sort.
+- **Spending charted by card.** Statistics can group the year by which card or bank account it is
+  charged to, as well as by category, and either can be narrowed to a single month.
+
+**Changed**
+
+- The Cards view is now **Cards & banks**, and its button **Add card or bank**. Bank accounts have
+  been supported since v3.4.0, but every label around the control that creates them said "card", so
+  nobody could tell they belonged there.
+
+**Fixed**
+
+- The share chart drew nothing when a single slice was the whole total — which is the state before
+  any subscription has been given a payment source. Tk treats an arc of a full circle as an arc of
+  nothing.
+
 ## v3.4.0 — 24 August 2026
 
 Subscriptions can say where they are charged, and DueKhata can tell you before a payment lands.

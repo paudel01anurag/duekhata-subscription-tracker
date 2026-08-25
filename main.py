@@ -94,7 +94,7 @@ from expense_tracker import (
 )
 
 
-APP_VERSION = "3.4.0"
+APP_VERSION = "3.5.0"
 APP_NAME = "DueKhata"
 APP_DATA_FOLDER = "DueKhata"
 

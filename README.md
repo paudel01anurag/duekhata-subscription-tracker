@@ -30,7 +30,8 @@ Everything is stored locally. There is no account, no server, and no network acc
 
 ## Features
 
-- Five views: a dashboard, a full subscription list, credit cards, a month calendar, and statistics
+- Five views: a dashboard, a full subscription list, cards and banks, a month calendar, and
+  statistics — with spending charted by category or by which card it is charged to
 - Five billing rhythms: one-off, weekly, monthly, quarterly and yearly
 - A start date and an optional end date, so cancelled subscriptions leave your forecast
 - Both figures that matter: what bills this month, and what your subscriptions cost per month on
@@ -43,7 +44,10 @@ Everything is stored locally. There is no account, no server, and no network acc
   network access and no account
 - Payments marked as paid per month, so last month's record survives into the next
 - Editing that preserves payment history
-- Search and filter the subscription list by name, category or billing rhythm
+- Search and filter the subscription list by name, category or billing rhythm, and sort any list by
+  clicking a column heading
+- Pause a subscription while it is frozen, keeping its history, without ending or deleting it
+- Back up and restore the whole database, or export what you pay to a spreadsheet
 - Warm light and dark themes
 - A local username and password gate
 
@@ -89,7 +93,11 @@ Subscriptions and payment records live in a SQLite database created on first run
 ```
 
 Never in the application folder, so replacing the executable with a newer version leaves your data
-untouched. There is **no backup or export yet** — treat that database as the only copy.
+untouched.
+
+**Keep a copy.** The save icon in the sidebar backs the whole database up wherever you choose, and
+restores it again. A backup carries everything, including which months you marked paid; the CSV
+export beside it is for reading in a spreadsheet and deliberately does not come back in.
 
 ## Tests
 
@@ -97,8 +105,9 @@ untouched. There is **no backup or export yet** — treat that database as the o
 python -m unittest discover -s tests
 ```
 
-Fifty-seven tests covering the recurrence rules, month and category totals, the monthly run rate,
-paid tracking, editing, credit cards, and the schema migration from older databases.
+135 tests covering the recurrence rules, month and category totals, the monthly run rate, paid
+tracking, editing, pausing, payment sources, reminders, backup and restore, and the schema migrations
+from older databases. They run on every push.
 
 ## Building
 
@@ -115,7 +124,8 @@ to name the archive. The executable is written to `dist\`, and the distributable
 
 A personal project shared openly, rather than a finished product.
 
-- **No backups or export.** Everything is in one file.
+- **Backups are manual.** There is a Back up now button, but nothing runs on a schedule. If you
+  never press it, there is no copy.
 - **The login is a latch, not a lock.** Passwords are hashed with PBKDF2-HMAC-SHA256, but the
   database itself is not encrypted, and the recovery option resets the password without proving
   identity. It keeps a casual passer-by out; it does not protect the data.
