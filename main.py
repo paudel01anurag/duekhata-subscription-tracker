@@ -1552,7 +1552,7 @@ class ExpenseTrackerApp:
     VIEWS = (
         ("dashboard", ICON_DASHBOARD, "Dashboard"),
         ("subscriptions", ICON_LIST, "Subscriptions"),
-        ("cards", ICON_CARD, "Cards"),
+        ("cards", ICON_CARD, "Cards & banks"),
         ("calendar", ICON_CALENDAR, "Calendar"),
         ("statistics", ICON_STATS, "Statistics"),
     )
@@ -1796,8 +1796,9 @@ class ExpenseTrackerApp:
         intro = tk.Label(
             view,
             text=(
-                "Cards are tracked for their due date, not their cost. What you pay here settles "
-                "purchases already listed under Subscriptions, so it is never added to your spending."
+                "Add the cards and bank accounts your subscriptions are charged to. A card is "
+                "tracked for its due date, not its cost: what you pay it settles purchases already "
+                "listed under Subscriptions, so it is never added to your spending."
             ),
             bg=theme["background"],
             fg=theme["text_muted"],
@@ -1845,7 +1846,7 @@ class ExpenseTrackerApp:
         actions = tk.Frame(view, bg=theme["background"])
         actions.grid(row=4, column=0, columnspan=2, sticky="e", pady=(SPACE_3, 0))
         self.card_add_button = PillButton(
-            actions, "Add card", self.open_add_card_dialog, theme, glyph=ICON_ADD
+            actions, "Add card or bank", self.open_add_card_dialog, theme, glyph=ICON_ADD
         )
         self.card_add_button.grid(row=0, column=0, padx=(0, SPACE_2))
         self.card_record_button = PillButton(
@@ -4035,7 +4036,7 @@ class CardDialog(tk.Toplevel):
         self.data_file = data_file
         self.refresh_callback = refresh_callback
         self.theme = WARM_DARK if theme_mode == "dark" else WARM_LIGHT
-        self.title("Edit card" if self.editing else "Add card")
+        self.title("Edit payment source" if self.editing else "Add a card or bank account")
         self.option_add("*insertBackground", self.theme["input_cursor"])
 
         self.name_var = tk.StringVar(value=card.name if self.editing else "")
@@ -4056,7 +4057,7 @@ class CardDialog(tk.Toplevel):
         header.grid(row=0, column=0, columnspan=2, sticky="ew", padx=SPACE_5, pady=(SPACE_5, SPACE_4))
         self.title_label = tk.Label(
             header,
-            text="Edit card" if self.editing else "Add a card",
+            text="Edit payment source" if self.editing else "Add a card or bank",
             bg=self.theme["background"],
             fg=self.theme["text"],
             font=display_font(16),
@@ -4089,7 +4090,7 @@ class CardDialog(tk.Toplevel):
         # Only a card has a bill of its own to pay. Money leaves a bank account
         # when a subscription bills, so a due day there would be a fiction.
         self.due_label = ttk.Label(self, text="Payment due on")
-        self.due_label.grid(row=3, column=1, sticky="w", padx=(SPACE_5, 0), pady=(0, SPACE_1))
+        self.due_label.grid(row=3, column=1, sticky="w", padx=(SPACE_5, SPACE_5), pady=(0, SPACE_1))
         self.due_box = ttk.Combobox(
             self, textvariable=self.due_day_var, state="readonly", width=8,
             values=[str(day) for day in range(1, 32)],
@@ -4178,7 +4179,7 @@ class CardDialog(tk.Toplevel):
         actions = tk.Frame(self, bg=self.theme["background"])
         actions.grid(row=12, column=0, columnspan=2, sticky="e", padx=SPACE_5, pady=(SPACE_2, SPACE_5))
         PillButton(actions, "Cancel", self.destroy, self.theme, variant="tonal").grid(row=0, column=0, padx=(0, SPACE_2))
-        PillButton(actions, "Save card", self.save_card_entry, self.theme, variant="filled").grid(row=0, column=1)
+        PillButton(actions, "Save", self.save_card_entry, self.theme, variant="filled").grid(row=0, column=1)
 
         # Guard against the trap that made the login dialog invisible: Tk
         # withdraws a transient whose master is itself withdrawn.
@@ -4233,9 +4234,13 @@ class CardDialog(tk.Toplevel):
                 text="A bank account has no bill of its own — money leaves it when a "
                 "subscription bills. It is here so a subscription can say where it is charged."
             )
+        # Only narrow the heading when editing, where the thing already has a
+        # kind. While adding, "Add a card" is what told Anurag this dialog was
+        # not where bank accounts come from — before he had chosen anything.
         self.title_label.configure(
-            text=("Edit " if self.editing else "Add a ")
-            + ("card" if is_card else "bank account")
+            text=("Edit " + ("card" if is_card else "bank account"))
+            if self.editing
+            else "Add a card or bank"
         )
 
     def save_card_entry(self) -> None:
