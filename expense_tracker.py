@@ -96,6 +96,10 @@ class Expense:
     # it has not been said. Purely a label: linking a subscription to a card
     # never moves money between the two halves of the application.
     paid_with: Optional[str] = None
+    # Temporarily not billing — a frozen gym membership, a service stopped for
+    # the winter. Distinct from an end date, which says it is over for good, and
+    # from deleting it, which throws the history away.
+    paused: bool = False
 
     def __post_init__(self) -> None:
         # `cadence` supersedes the older `recurring_monthly` flag. Normalising
@@ -142,6 +146,8 @@ def _migrate_expense_columns(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE expenses ADD COLUMN ends_on TEXT")
     if "paid_with" not in existing:
         connection.execute("ALTER TABLE expenses ADD COLUMN paid_with TEXT")
+    if "paused" not in existing:
+        connection.execute("ALTER TABLE expenses ADD COLUMN paused INTEGER NOT NULL DEFAULT 0")
 
     connection.execute(
         """
@@ -203,7 +209,8 @@ def create_schema(data_file: Path) -> None:
                 color TEXT NOT NULL DEFAULT '#f4a261',
                 cadence TEXT,
                 ends_on TEXT,
-                paid_with TEXT
+                paid_with TEXT,
+                paused INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -380,6 +387,7 @@ def _to_dict(expense: Expense) -> dict[str, object]:
         "cadence": expense.cadence,
         "ends_on": expense.ends_on,
         "paid_with": expense.paid_with,
+        "paused": bool(expense.paused),
     }
 
 
@@ -393,11 +401,12 @@ def _upsert_expenses(connection: sqlite3.Connection, expenses: List[Expense]) ->
             """
             INSERT INTO expenses (
                 id, description, amount, date, account, category,
-                recurring_monthly, due_day, expense_type, color, cadence, ends_on, paid_with
+                recurring_monthly, due_day, expense_type, color, cadence, ends_on, paid_with,
+                paused
             ) VALUES (
                 :id, :description, :amount, :date, :account, :category,
                 :recurring_monthly, :due_day, :expense_type, :color, :cadence, :ends_on,
-                :paid_with
+                :paid_with, :paused
             )
             ON CONFLICT(id) DO UPDATE SET
                 description = excluded.description,
@@ -411,7 +420,8 @@ def _upsert_expenses(connection: sqlite3.Connection, expenses: List[Expense]) ->
                 color = excluded.color,
                 cadence = excluded.cadence,
                 ends_on = excluded.ends_on,
-                paid_with = excluded.paid_with
+                paid_with = excluded.paid_with,
+                paused = excluded.paused
             """,
             data,
         )
@@ -458,7 +468,7 @@ def load_expenses(data_file: Path) -> List[Expense]:
         rows = connection.execute(
             """
             SELECT id, description, amount, date, account, category, recurring_monthly,
-                   due_day, expense_type, color, cadence, ends_on, paid_with
+                   due_day, expense_type, color, cadence, ends_on, paid_with, paused
             FROM expenses
             ORDER BY date, description
             """
@@ -479,6 +489,7 @@ def load_expenses(data_file: Path) -> List[Expense]:
             cadence=row["cadence"] or "",
             ends_on=row["ends_on"],
             paid_with=row["paid_with"],
+            paused=bool(row["paused"]),
         )
         for row in rows
     ]
@@ -521,10 +532,10 @@ def add_expense(data_file: Path, expense: Expense) -> None:
             """
             INSERT INTO expenses (
                 id, description, amount, date, account, category, recurring_monthly,
-                due_day, expense_type, color, cadence, ends_on, paid_with
+                due_day, expense_type, color, cadence, ends_on, paid_with, paused
             ) VALUES (
                 :id, :description, :amount, :date, :account, :category, :recurring_monthly,
-                :due_day, :expense_type, :color, :cadence, :ends_on, :paid_with
+                :due_day, :expense_type, :color, :cadence, :ends_on, :paid_with, :paused
             )
             """,
             payload,
@@ -559,7 +570,8 @@ def update_expense(data_file: Path, expense: Expense) -> None:
                 color = :color,
                 cadence = :cadence,
                 ends_on = :ends_on,
-                paid_with = :paid_with
+                paid_with = :paid_with,
+                paused = :paused
             WHERE id = :id
             """,
             _to_dict(expense),
@@ -1074,6 +1086,7 @@ def create_expense(
     ends_on: Optional[str] = None,
     expense_id: Optional[str] = None,
     paid_with: Optional[str] = None,
+    paused: bool = False,
 ) -> Expense:
     normalized_amount = None if amount is None else round(float(amount), 2)
     normalized_date = expense_date or ""
@@ -1104,6 +1117,7 @@ def create_expense(
         cadence=cadence,
         ends_on=ends_on,
         paid_with=paid_with or None,
+        paused=bool(paused),
     )
 
 
@@ -1134,6 +1148,12 @@ def occurs_on(expense: Expense, day: date) -> bool:
     The stored `date` is the first billing date and `ends_on` the last, so a
     subscription never appears before it started or after it was cancelled.
     """
+    # Everything else follows from here: the calendar, month totals, the
+    # upcoming list and the reminders all ask this one question, so pausing is
+    # answered once rather than in nine places.
+    if expense.paused:
+        return False
+
     start = _parse_iso(expense.date)
     if start is None or day < start:
         return False
@@ -1283,7 +1303,7 @@ def monthly_equivalent(expense: Expense) -> float:
 
     A one-off has no monthly cost, because it is not a commitment that repeats.
     """
-    if expense.amount is None:
+    if expense.amount is None or expense.paused:
         return 0.0
     factor = MONTHLY_EQUIVALENT.get(expense.cadence)
     if factor is None:

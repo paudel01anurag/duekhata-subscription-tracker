@@ -1762,6 +1762,7 @@ class ExpenseTrackerApp:
         for key, title, width, anchor, stretch in headings:
             self.all_list.heading(key, text=title, anchor=anchor)
             self.all_list.column(key, width=width, minwidth=70, anchor=anchor, stretch=stretch)
+        self._make_sortable(self.all_list, headings, "subscription_sort", "next")
         self.all_list.grid(row=1, column=0, sticky="nsew")
 
         scrollbar = ttk.Scrollbar(view, orient="vertical", command=self.all_list.yview)
@@ -1832,6 +1833,7 @@ class ExpenseTrackerApp:
         for key, title, width, anchor, stretch in headings:
             self.cards_list.heading(key, text=title, anchor=anchor)
             self.cards_list.column(key, width=width, minwidth=80, anchor=anchor, stretch=stretch)
+        self._make_sortable(self.cards_list, headings, "card_sort", "due")
         self.cards_list.grid(row=3, column=0, sticky="nsew")
 
         scrollbar = ttk.Scrollbar(view, orient="vertical", command=self.cards_list.yview)
@@ -1915,9 +1917,22 @@ class ExpenseTrackerApp:
         last_month = get_card_payments(self.data_file, previous_year, previous_month)
         year_totals = get_card_year_totals(self.data_file, year)
 
+        # Build every row first so the list can be ordered by whichever
+        # heading was last clicked, then insert in that order.
+        rows = []
         for card in self.cards:
             run_rate = subscription_run_rate_for_source(self.expenses, card.id)
             linked = len(expenses_charged_to(self.expenses, card.id))
+            rows.append((
+                card,
+                this_month.get(card.id) if card.is_card else None,
+                last_month.get(card.id) if card.is_card else None,
+                year_totals.get(card.id, 0.0) if card.is_card else 0.0,
+                linked,
+                run_rate,
+            ))
+
+        for card, paid, previous, year_total, linked, run_rate in self._sort_card_rows(rows):
             subs_text = "—" if not linked else (
                 str(linked) + " · $" + format(run_rate, ",.2f") + "/mo"
             )
@@ -1934,8 +1949,6 @@ class ExpenseTrackerApp:
                 continue
 
             due = card_due_date(card, year, month)
-            paid = this_month.get(card.id)
-            previous = last_month.get(card.id)
 
             # The comparison is the reason this view exists: is what I am
             # paying down going up or coming down?
@@ -1961,7 +1974,7 @@ class ExpenseTrackerApp:
                     "not yet" if paid is None else "$" + format(paid, ",.2f"),
                     "—" if previous is None else "$" + format(previous, ",.2f"),
                     change,
-                    "$" + format(year_totals.get(card.id, 0.0), ",.2f"),
+                    "$" + format(year_total, ",.2f"),
                 ),
                 iid=card.id,
             )
@@ -2543,6 +2556,107 @@ class ExpenseTrackerApp:
                 fill=theme["text_muted"], font=text_font(8),
             )
 
+
+    # --- sorting by clicking a column heading -------------------------
+    #
+    # Sorting adds no new control: the headings that are already there become
+    # the way to sort. Clicking one sorts by it, clicking it again reverses,
+    # and an arrow in the heading says which is in force.
+
+    SORT_ARROWS = {True: "  " + chr(0x25BC), False: "  " + chr(0x25B2)}
+
+    def _make_sortable(self, tree, headings, state_name, default_key) -> None:
+        """Wire a Treeview's headings so clicking one sorts by it."""
+        setattr(self, state_name, (default_key, False))
+
+        def clicked(key):
+            current_key, descending = getattr(self, state_name)
+            # A second click on the same heading reverses; a new heading starts
+            # ascending, which is what people expect from a table.
+            getattr(self, state_name)
+            setattr(self, state_name, (key, not descending if key == current_key else False))
+            self._label_sortable(tree, headings, state_name)
+            self.refresh_view()
+
+        for key, title, *_rest in headings:
+            tree.heading(key, command=lambda k=key: clicked(k))
+        self._label_sortable(tree, headings, state_name)
+
+    def _label_sortable(self, tree, headings, state_name) -> None:
+        key_in_force, descending = getattr(self, state_name)
+        for key, title, *_rest in headings:
+            arrow = self.SORT_ARROWS[descending] if key == key_in_force else ""
+            tree.heading(key, text=title + arrow)
+
+    def _sort_subscription_rows(self, rows: list) -> list:
+        """Order the subscription list by whichever heading was last clicked.
+
+        The default keeps what the view has always done: soonest first, with
+        anything finished or paused at the bottom. Choosing a column sorts
+        strictly by that column instead, because a sort that quietly keeps
+        groups apart is a sort people cannot predict.
+        """
+        key, descending = getattr(self, "subscription_sort", ("next", False))
+        today = date.today()
+
+        if key == "next":
+            rows.sort(key=lambda pair: (
+                pair[0] is None, pair[0] or date.max, pair[1].description.lower()
+            ))
+            if descending:
+                rows.reverse()
+            return rows
+
+        def sort_value(pair):
+            following, expense = pair
+            if key == "description":
+                return expense.description.lower()
+            if key == "amount":
+                return -1.0 if expense.amount is None else expense.amount
+            if key == "cadence":
+                order = list(CADENCES)
+                return order.index(expense.cadence) if expense.cadence in order else len(order)
+            if key == "category":
+                return expense.category.lower()
+            if key == "source":
+                return (payment_source_name(self.cards, expense.paid_with) or "").lower()
+            return expense.description.lower()
+
+        rows.sort(key=lambda pair: (sort_value(pair), pair[1].description.lower()))
+        if descending:
+            rows.reverse()
+        return rows
+
+    def _sort_card_rows(self, rows: list) -> list:
+        """Order the payment sources by whichever heading was last clicked."""
+        key, descending = getattr(self, "card_sort", ("due", False))
+
+        def sort_value(row):
+            card, this_month, previous, year_total, count, monthly = row
+            if key == "name":
+                return card.name.lower()
+            if key == "kind":
+                return (card.kind != KIND_CARD, card.name.lower())
+            if key == "due":
+                return (card.due_day is None, card.due_day or 0, card.name.lower())
+            if key == "subscriptions":
+                return (-count, -monthly)
+            if key == "this_month":
+                return -1.0 if this_month is None else -this_month
+            if key == "last_month":
+                return -1.0 if previous is None else -previous
+            if key == "change":
+                if this_month is None or previous is None:
+                    return float("inf")
+                return -(this_month - previous)
+            if key == "year":
+                return -year_total
+            return card.name.lower()
+
+        rows.sort(key=sort_value)
+        if descending:
+            rows.reverse()
+        return rows
 
     def _available_categories(self) -> list[str]:
         return sorted({expense.category for expense in self.expenses if expense.category})
@@ -3126,14 +3240,14 @@ class ExpenseTrackerApp:
             following = next_occurrence(expense, today)
             rows.append((following, expense))
 
-        # Anything still running sorts first, by how soon it is due; finished
-        # subscriptions fall to the bottom in alphabetical order.
-        rows.sort(key=lambda pair: (pair[0] is None, pair[0] or date.max, pair[1].description.lower()))
+        rows = self._sort_subscription_rows(rows)
 
         for following, expense in rows:
             amount = "Planned" if expense.amount is None else f"${expense.amount:,.2f}"
             cadence = self.CADENCE_LABELS.get(expense.cadence, expense.cadence.title())
-            if following is None:
+            if expense.paused:
+                due = "Paused"
+            elif following is None:
                 due = "Ended"
             elif following == today:
                 due = "Today"
@@ -4128,6 +4242,7 @@ class AddExpenseDialog(tk.Toplevel):
         )
         self.ends_on_var = tk.StringVar(value=(expense.ends_on or "") if self.editing else "")
         self.paid_now_var = tk.BooleanVar(value=False)
+        self.paused_var = tk.BooleanVar(value=expense.paused if self.editing else False)
 
         self.configure(bg=self.theme["background"])
         self.resizable(False, False)
@@ -4278,10 +4393,35 @@ class AddExpenseDialog(tk.Toplevel):
             text="Mark as paid this month",
             variable=self.paid_now_var,
         ).pack(anchor="w")
+
+        # Pausing is not the same as ending. An end date says it is over for
+        # good; this says not for now, keeps the history, and is one tick away
+        # from being undone.
+        pause_frame = tk.Frame(self, bg=self.theme["background"])
+        pause_frame.grid(row=14, column=0, columnspan=2, sticky="w", padx=SPACE_5, pady=(0, SPACE_1))
+        ttk.Checkbutton(
+            pause_frame,
+            text="Paused",
+            variable=self.paused_var,
+            command=self._sync_pause_hint,
+        ).pack(anchor="w")
+
+        self.pause_hint = tk.Label(
+            self,
+            text="",
+            bg=self.theme["background"],
+            fg=self.theme["text_muted"],
+            font=text_font(9),
+            justify="left",
+            wraplength=430,
+        )
+        self.pause_hint.grid(row=15, column=0, columnspan=2, sticky="w", padx=SPACE_5, pady=(0, SPACE_3))
+
         self._sync_end_date_state()
+        self._sync_pause_hint()
 
         color_panel = tk.Frame(self, bg=self.theme["background"])
-        color_panel.grid(row=14, column=0, columnspan=2, sticky="w", padx=SPACE_5, pady=(SPACE_2, SPACE_3))
+        color_panel.grid(row=16, column=0, columnspan=2, sticky="w", padx=SPACE_5, pady=(SPACE_2, SPACE_3))
         tk.Label(color_panel, text="Color", bg=self.theme["background"], fg=self.theme["text"], font=text_font(10)).pack(side="left", padx=(0, SPACE_2))
         self.color_preview = tk.Canvas(
             color_panel,
@@ -4303,7 +4443,7 @@ class AddExpenseDialog(tk.Toplevel):
         self.color_toggle_button.pack(side="left")
 
         self.color_choices = tk.Frame(self, bg=self.theme["background"])
-        self.color_choices.grid(row=15, column=0, columnspan=2, sticky="w", padx=SPACE_5, pady=(0, SPACE_3))
+        self.color_choices.grid(row=17, column=0, columnspan=2, sticky="w", padx=SPACE_5, pady=(0, SPACE_3))
         for color in ["#f2c14e", "#d97745", "#668f80", "#5f7db8", "#8d6fb0"]:
             swatch = tk.Canvas(
                 self.color_choices,
@@ -4328,7 +4468,7 @@ class AddExpenseDialog(tk.Toplevel):
         self.color_choices.grid_remove()
 
         actions = tk.Frame(self, bg=self.theme["background"])
-        actions.grid(row=16, column=0, columnspan=2, sticky="e", padx=SPACE_5, pady=(SPACE_2, SPACE_5))
+        actions.grid(row=18, column=0, columnspan=2, sticky="e", padx=SPACE_5, pady=(SPACE_2, SPACE_5))
         PillButton(actions, "Cancel", self.destroy, self.theme, variant="tonal").grid(row=0, column=0, padx=(0, SPACE_2))
         PillButton(actions, "Save subscription", self.save_expense, self.theme, variant="filled").grid(row=0, column=1)
 
@@ -4403,6 +4543,16 @@ class AddExpenseDialog(tk.Toplevel):
     def _selected_cadence(self) -> str:
         return LABELS_TO_CADENCE.get(self.cadence_var.get(), CADENCE_MONTHLY)
 
+    def _sync_pause_hint(self) -> None:
+        self.pause_hint.config(
+            text=(
+                "Nothing bills and no reminders are raised while this is ticked. Everything you "
+                "have already marked as paid is kept."
+                if self.paused_var.get()
+                else "Tick this to stop a subscription temporarily without losing its history."
+            )
+        )
+
     def _sync_end_date_state(self) -> None:
         """A one-off payment has a single date, so an end date is meaningless."""
         is_once = self._selected_cadence() == CADENCE_ONCE
@@ -4474,6 +4624,7 @@ class AddExpenseDialog(tk.Toplevel):
             due_day=due_day,
             expense_type=self.expense_type_var.get().strip() or "Fixed",
             paid_with=self._selected_source_id(),
+            paused=self.paused_var.get(),
             color=self.color_var.get() or "#f2c14e",
             cadence=cadence,
             ends_on=ends_on,
