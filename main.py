@@ -4455,7 +4455,12 @@ class AddExpenseDialog(tk.Toplevel):
             highlightcolor=self.theme["accent"],
         ).grid(row=2, column=0, columnspan=2, sticky="ew", padx=SPACE_5, pady=(0, SPACE_3), ipady=7)
 
-        ttk.Label(self, text="Amount").grid(row=3, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_1))
+        # Naming the currency here answers the question where it gets asked.
+        # Anurag looked for the setting in this dialog, because this is where
+        # you think about what an amount means.
+        ttk.Label(self, text="Amount (" + current_currency() + ")").grid(
+            row=3, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_1)
+        )
         tk.Entry(
             self,
             textvariable=self.amount_var,
