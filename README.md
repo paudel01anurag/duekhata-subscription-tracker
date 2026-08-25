@@ -48,6 +48,7 @@ Everything is stored locally. There is no account, no server, and no network acc
   clicking a column heading
 - Pause a subscription while it is frozen, keeping its history, without ending or deleting it
 - Back up and restore the whole database, or export what you pay to a spreadsheet
+- Choose the currency amounts are shown in, or type your own symbol
 - Warm light and dark themes
 - A local username and password gate
 
@@ -129,7 +130,8 @@ A personal project shared openly, rather than a finished product.
 - **The login is a latch, not a lock.** Passwords are hashed with PBKDF2-HMAC-SHA256, but the
   database itself is not encrypted, and the recovery option resets the password without proving
   identity. It keeps a casual passer-by out; it does not protect the data.
-- **Windows only**, and amounts are in dollars.
+- **Windows only.** Amounts are shown in whatever currency you choose, but nothing is converted —
+  one installation is one currency.
 
 ## Project layout
 

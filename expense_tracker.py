@@ -814,6 +814,85 @@ def subscription_run_rate_for_source(expenses: List[Expense], card_id: str) -> f
     )
 
 
+# --- money -----------------------------------------------------------------
+#
+# Every amount on screen and in every export goes through `money()`. It reads a
+# module-level setting rather than taking the currency as an argument, because
+# the alternative is threading it through roughly thirty call sites that have no
+# other reason to know about it. `set_currency` is called once at startup and
+# again when it is changed.
+
+CURRENCY_SETTING = "currency"
+
+# A short list rather than the ISO 4217 catalogue. Someone whose currency is
+# missing can type their own symbol, which covers everyone without presenting
+# 180 options to choose between.
+#
+# `space` is whether the symbol needs separating from the digits: "$22.99" reads
+# correctly, "Rs.1,200" does not.
+CURRENCIES = (
+    ("USD", "$", False, "US dollar"),
+    ("NPR", "Rs.", True, "Nepalese rupee"),
+    ("INR", "₹", False, "Indian rupee"),
+    ("GBP", "£", False, "Pound sterling"),
+    ("EUR", "€", False, "Euro"),
+    ("AUD", "A$", False, "Australian dollar"),
+    ("CAD", "C$", False, "Canadian dollar"),
+    ("JPY", "¥", False, "Japanese yen"),
+    ("AED", "AED", True, "UAE dirham"),
+    ("SGD", "S$", False, "Singapore dollar"),
+)
+
+DEFAULT_CURRENCY = "$"
+
+_currency_symbol = DEFAULT_CURRENCY
+_currency_space = False
+
+
+def set_currency(symbol: str, space: Optional[bool] = None) -> None:
+    """Choose the symbol every amount is shown with.
+
+    When `space` is not given it is inferred: a symbol made of letters needs
+    separating from the digits, a glyph does not.
+    """
+    global _currency_symbol, _currency_space
+    cleaned = (symbol or "").strip() or DEFAULT_CURRENCY
+    _currency_symbol = cleaned
+    if space is None:
+        known = {code_symbol: needs for _code, code_symbol, needs, _name in CURRENCIES}
+        space = known.get(cleaned, any(character.isalpha() for character in cleaned))
+    _currency_space = bool(space)
+
+
+def current_currency() -> str:
+    return _currency_symbol
+
+
+def reset_currency() -> None:
+    """Back to the default. Exists so tests are not order-dependent."""
+    set_currency(DEFAULT_CURRENCY, False)
+
+
+def money(value: Optional[float], places: int = 2) -> str:
+    """One amount, formatted the way this installation shows money."""
+    if value is None:
+        return ""
+    figure = format(value, "," + "." + str(places) + "f")
+    return _currency_symbol + (" " if _currency_space else "") + figure
+
+
+def load_currency(data_file: Path) -> str:
+    """Apply the stored choice. Called once, at startup."""
+    symbol = get_setting(data_file, CURRENCY_SETTING, DEFAULT_CURRENCY) or DEFAULT_CURRENCY
+    set_currency(symbol)
+    return symbol
+
+
+def save_currency(data_file: Path, symbol: str) -> None:
+    set_setting(data_file, CURRENCY_SETTING, (symbol or "").strip() or DEFAULT_CURRENCY)
+    set_currency(symbol)
+
+
 def get_setting(data_file: Path, key: str, default: str = "") -> str:
     if data_file.suffix.lower() == ".json" or not data_file.exists():
         return default
@@ -899,7 +978,7 @@ class Reminder:
             where = " for " + self.source if self.source else ""
             return "Payment" + where + " is due " + when + ", on " + on + "."
 
-        amount = "an unknown amount" if self.amount is None else "$" + format(self.amount, ",.2f")
+        amount = "an unknown amount" if self.amount is None else money(self.amount)
         where = " to " + self.source if self.source else ""
         return "Charging " + amount + where + " " + when + ", on " + on + "."
 

@@ -28,6 +28,14 @@ from expense_tracker import (
     get_category_totals,
     get_totals_by,
     get_source_totals,
+    money,
+    current_currency,
+    load_currency,
+    set_currency,
+    save_currency,
+    CURRENCIES,
+    CURRENCY_SETTING,
+    DEFAULT_CURRENCY,
     get_monthly_totals,
     get_upcoming,
     CADENCE_LABELS,
@@ -103,6 +111,23 @@ PREVIOUS_APP_DATA_FOLDERS = ("SubscriptionTracker",)
 AUTH_PASSWORD_ITERATIONS = 200_000
 AUTH_PASSWORD_MIN_LENGTH = 8
 AUTH_RECOVER_SENTINEL = "__subscription_tracker_recover__"
+
+
+def _strip_currency(text: str) -> str:
+    """Take an amount the way someone typed it, symbol and all.
+
+    People re-type what they see, so an amount box has to accept "Rs. 1,200" as
+    readily as "1200". Stripping only a dollar sign worked while a dollar sign
+    was the only thing on screen.
+    """
+    cleaned = (text or "").strip()
+    symbol = current_currency()
+    if symbol and cleaned.startswith(symbol):
+        cleaned = cleaned[len(symbol):]
+    # Any leading symbol, not only the one in force: a database can be moved
+    # between installations set to different currencies.
+    cleaned = cleaned.lstrip("$£€₹¥ ")
+    return cleaned.replace(",", "").strip()
 
 
 def _parse_date(value: str | None):
@@ -245,6 +270,7 @@ ICON_CALENDAR = chr(0xE787)
 ICON_STATS = chr(0xE9D9)
 ICON_EDIT = chr(0xE70F)
 ICON_BELL = chr(0xEA8F)
+ICON_SETTINGS = chr(0xE713)
 ICON_CARD = chr(0xE8C7)
 ICON_SAVE = chr(0xE74E)
 
@@ -263,6 +289,7 @@ ICON_FALLBACK = {
     ICON_STATS: "▓",
     ICON_EDIT: "✎",
     ICON_BELL: "🔔",
+    ICON_SETTINGS: "⚙",
     ICON_CARD: "▭",
     ICON_SAVE: "🖫",
 }
@@ -1240,6 +1267,9 @@ class ExpenseTrackerApp:
 
         self.data_file = data_file
         self.authenticated_username = username or ""
+        # Before anything is drawn: every amount on screen goes through money(),
+        # which reads this.
+        load_currency(self.data_file)
         self.expenses = load_expenses(self.data_file)
         self.cards = load_cards(self.data_file)
         self.current_date = date.today().replace(day=1)
@@ -1439,7 +1469,7 @@ class ExpenseTrackerApp:
 
         irregular_amount, irregular_kinds = getattr(self, "irregular_this_month", (0.0, []))
         if irregular_amount:
-            note = "incl. $" + format(irregular_amount, ",.2f") + " " + " and ".join(irregular_kinds)
+            note = "incl. " + money(irregular_amount) + " " + " and ".join(irregular_kinds)
         else:
             note = ""
 
@@ -1484,7 +1514,7 @@ class ExpenseTrackerApp:
             self.stats_canvas.create_text(
                 x1 + SPACE_4,
                 top + SPACE_4 + 15,
-                text=f"${value:,.2f}",
+                text=money(value),
                 anchor="nw",
                 fill=value_color,
                 font=display_font(19),
@@ -1628,8 +1658,11 @@ class ExpenseTrackerApp:
         )
         self.backup_button.grid(row=0, column=1, sticky="e", padx=(0, SPACE_2))
 
+        # A gear rather than a bell: this holds the currency as well now, and
+        # two icons for two settings would have been one more than the footer
+        # can carry beside the avatar.
         self.reminder_button = IconButton(
-            footer, ICON_BELL, self.open_reminders_dialog, theme, variant="tonal"
+            footer, ICON_SETTINGS, self.open_settings_dialog, theme, variant="tonal"
         )
         self.reminder_button.grid(row=0, column=2, sticky="e", padx=(0, SPACE_2))
 
@@ -1882,9 +1915,9 @@ class ExpenseTrackerApp:
         outstanding = values["outstanding"]
         tiles = [
             ("PAID ON CARDS IN " + str(self.current_date.year),
-             "$" + format(values["year"], ",.2f"), theme["text"]),
+             money(values["year"]), theme["text"]),
             ("PAID THIS MONTH",
-             "$" + format(values["month"], ",.2f"), theme["positive"]),
+             money(values["month"]), theme["positive"]),
             ("STILL TO PAY",
              str(outstanding) + (" card" if outstanding == 1 else " cards"),
              theme["accent"] if outstanding else theme["text_secondary"]),
@@ -1936,7 +1969,7 @@ class ExpenseTrackerApp:
 
         for card, paid, previous, year_total, linked, run_rate in self._sort_card_rows(rows):
             subs_text = "—" if not linked else (
-                str(linked) + " · $" + format(run_rate, ",.2f") + "/mo"
+                str(linked) + " · " + money(run_rate) + "/mo"
             )
 
             if not card.is_card:
@@ -1964,7 +1997,7 @@ class ExpenseTrackerApp:
                     change = "same"
                 else:
                     sign = "+" if difference > 0 else "−"
-                    change = sign + "$" + format(abs(difference), ",.2f")
+                    change = sign + money(abs(difference))
 
             self.cards_list.insert(
                 "", "end",
@@ -1973,10 +2006,10 @@ class ExpenseTrackerApp:
                     KIND_LABELS[card.kind],
                     due.strftime("%d %b") if due else "—",
                     subs_text,
-                    "not yet" if paid is None else "$" + format(paid, ",.2f"),
-                    "—" if previous is None else "$" + format(previous, ",.2f"),
+                    "not yet" if paid is None else money(paid),
+                    "—" if previous is None else money(previous),
                     change,
-                    "$" + format(year_total, ",.2f"),
+                    money(year_total),
                 ),
                 iid=card.id,
             )
@@ -2021,8 +2054,10 @@ class ExpenseTrackerApp:
         dialog.grab_set()
         self.root.wait_window(dialog)
 
-    def open_reminders_dialog(self) -> None:
-        dialog = RemindersDialog(self.root, self.data_file, theme_mode=self.theme_mode.get())
+    def open_settings_dialog(self) -> None:
+        dialog = SettingsDialog(
+            self.root, self.data_file, self.refresh_view, theme_mode=self.theme_mode.get()
+        )
         dialog.grab_set()
         self.root.wait_window(dialog)
 
@@ -2360,7 +2395,7 @@ class ExpenseTrackerApp:
                 left, y, text=name, anchor="nw", fill=theme["text"], font=text_font(9, bold=True)
             )
             canvas.create_text(
-                right, y, text=f"${value:,.2f}", anchor="ne",
+                right, y, text=money(value), anchor="ne",
                 fill=theme["text_secondary"], font=text_font(9),
             )
             track_top = y + 18
@@ -2426,7 +2461,7 @@ class ExpenseTrackerApp:
                 )
             elif entry.amount is not None:
                 canvas.create_text(
-                    right, y + 5, text=f"${entry.amount:,.2f}", anchor="ne",
+                    right, y + 5, text=money(entry.amount), anchor="ne",
                     fill=theme["text"], font=text_font(9),
                 )
 
@@ -2473,7 +2508,7 @@ class ExpenseTrackerApp:
             )
             if is_current and value:
                 canvas.create_text(
-                    centre, baseline - height - 4, text=f"${value:,.0f}", anchor="s",
+                    centre, baseline - height - 4, text=money(value, 0), anchor="s",
                     fill=theme["text"], font=text_font(8, bold=True),
                 )
 
@@ -2552,7 +2587,7 @@ class ExpenseTrackerApp:
         # The hole is what makes it a donut, and gives the total somewhere to live.
         hole = int(radius * 0.58)
         canvas.create_oval(cx - hole, cy - hole, cx + hole, cy + hole, fill=theme["surface"], outline="")
-        canvas.create_text(cx, cy - 8, text=f"${total:,.0f}", fill=theme["text"], font=display_font(15))
+        canvas.create_text(cx, cy - 8, text=money(total, 0), fill=theme["text"], font=display_font(15))
         canvas.create_text(
             cx, cy + 10, text=self._breakdown_period_caption(),
             fill=theme["text_muted"], font=text_font(7, bold=True),
@@ -2575,7 +2610,7 @@ class ExpenseTrackerApp:
                 fill=theme["text_secondary"], font=text_font(9),
             )
             canvas.create_text(
-                legend_right, y, text=f"{value / total * 100:.0f}%   ${value:,.0f}", anchor="ne",
+                legend_right, y, text=f"{value / total * 100:.0f}%   " + money(value, 0), anchor="ne",
                 fill=theme["text"], font=text_font(9),
             )
 
@@ -2592,7 +2627,7 @@ class ExpenseTrackerApp:
                 left, y, text=name, anchor="nw", fill=theme["text"], font=text_font(9, bold=True)
             )
             canvas.create_text(
-                right, y, text=f"{value / total * 100:.0f}%   ${value:,.2f}", anchor="ne",
+                right, y, text=f"{value / total * 100:.0f}%   " + money(value), anchor="ne",
                 fill=theme["text_secondary"], font=text_font(9),
             )
             track_top = y + 18
@@ -2737,8 +2772,8 @@ class ExpenseTrackerApp:
 
     def _format_total_rows(self, projected: float, remaining: float) -> tuple[str, str]:
         return (
-            f"Projected monthly total: ${projected:.2f}",
-            f"Remaining this month: ${remaining:.2f}",
+            "Projected monthly total: " + money(projected),
+            "Remaining this month: " + money(remaining),
         )
 
     def _wrap_calendar_text(self, text: str, max_width: int, max_lines: int = 2) -> list[str]:
@@ -2817,7 +2852,7 @@ class ExpenseTrackerApp:
         day_paid = sum(expense.amount or 0 for expense in day_expenses if expense.id in self.paid_expense_ids)
         entry_word = "subscription" if len(day_expenses) == 1 else "subscriptions"
         self.day_summary_text = (
-            f"{len(day_expenses)} {entry_word}  ·  ${day_total:,.2f} due  ·  ${day_paid:,.2f} paid"
+            f"{len(day_expenses)} {entry_word}  ·  " + money(day_total) + " due  ·  " + money(day_paid) + " paid"
         )
         self.selected_day_label.config(text=self.selected_date.strftime("%A, %B %d"))
         self.subtitle_label.config(text=self._welcome_text())
@@ -2939,7 +2974,7 @@ class ExpenseTrackerApp:
             cell.create_text(
                 width - SPACE_3,
                 SPACE_2 + 2,
-                text=f"${day_total:,.0f}",
+                text=money(day_total, 0),
                 anchor="ne",
                 fill=theme["text_secondary"],
                 font=text_font(9, bold=True),
@@ -3138,7 +3173,7 @@ class ExpenseTrackerApp:
         detail_list.configure(yscrollcommand=scrollbar.set)
 
         for expense in expenses:
-            amount_text = "Planned" if expense.amount is None else f"${expense.amount:.2f}"
+            amount_text = "Planned" if expense.amount is None else money(expense.amount)
             status_text = "Paid" if expense.id in self.paid_expense_ids else "Pending"
             detail_list.insert(
                 "", "end",
@@ -3179,7 +3214,7 @@ class ExpenseTrackerApp:
             )
 
         for index, expense in enumerate(expenses):
-            amount_text = "Planned" if expense.amount is None else f"${expense.amount:.2f}"
+            amount_text = "Planned" if expense.amount is None else money(expense.amount)
             status_text = "Paid" if expense.id in self.paid_expense_ids else "Pending"
             description = self._describe(expense)
 
@@ -3313,7 +3348,7 @@ class ExpenseTrackerApp:
         rows = self._sort_subscription_rows(rows)
 
         for following, expense in rows:
-            amount = "Planned" if expense.amount is None else f"${expense.amount:,.2f}"
+            amount = "Planned" if expense.amount is None else money(expense.amount)
             cadence = self.CADENCE_LABELS.get(expense.cadence, expense.cadence.title())
             if expense.paused:
                 due = "Paused"
@@ -3639,39 +3674,79 @@ class BackupDialog(tk.Toplevel):
         self._say("Wrote every recorded card payment to " + written.name + ".")
 
 
-class RemindersDialog(tk.Toplevel):
-    """Turn desktop reminders on, and say how much warning you want.
+class SettingsDialog(tk.Toplevel):
+    """The two things that are set once and then left alone.
 
-    Everything here is local. Switching this on asks Windows to run DueKhata
-    once a day, which looks at what is coming and raises a notification. No
-    email, no server, and nothing leaves the machine.
+    Everything here is local. Switching reminders on asks Windows to run
+    DueKhata once a day, which looks at what is coming and raises a
+    notification. No email, no server, and nothing leaves the machine.
     """
 
     def __init__(
         self,
         master: tk.Tk,
         data_file: Path,
+        refresh_callback=None,
         theme_mode: str = "light",
     ) -> None:
         super().__init__(master)
         self.data_file = data_file
+        self.refresh_callback = refresh_callback
         self.theme = WARM_DARK if theme_mode == "dark" else WARM_LIGHT
-        self.title("Reminders")
+        self.title("Settings")
         self.configure(bg=self.theme["background"])
         self.resizable(False, False)
         self.columnconfigure(0, weight=1)
 
+        self.currency_var = tk.StringVar(value=self._describe_currency(current_currency()))
         self.enabled_var = tk.BooleanVar(value=reminders_are_on(data_file))
         self.days_var = tk.StringVar(value=str(reminder_days(data_file)))
         self.time_var = tk.StringVar(value=get_setting(data_file, REMINDER_TIME, "09:00"))
 
         tk.Label(
             self,
-            text="Reminders",
+            text="Settings",
             bg=self.theme["background"],
             fg=self.theme["text"],
             font=display_font(16),
-        ).grid(row=0, column=0, sticky="w", padx=SPACE_5, pady=(SPACE_5, SPACE_2))
+        ).grid(row=0, column=0, sticky="w", padx=SPACE_5, pady=(SPACE_5, SPACE_3))
+
+        tk.Label(
+            self, text="Currency", bg=self.theme["background"], fg=self.theme["text"],
+            font=text_font(11, bold=True),
+        ).grid(row=90, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_1))
+
+        currency_row = tk.Frame(self, bg=self.theme["background"])
+        currency_row.grid(row=91, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_1))
+
+        # Editable rather than readonly: someone whose currency is not in the
+        # list can type their own symbol, which is why the list can stay short.
+        self.currency_box = ttk.Combobox(
+            currency_row, textvariable=self.currency_var, state="normal", width=26,
+            values=[self._describe_currency(symbol) for _c, symbol, _s, _n in CURRENCIES],
+        )
+        self.currency_box.pack(side="left")
+        self.currency_box.bind("<<ComboboxSelected>>", lambda _e: self._preview_currency())
+        self.currency_var.trace_add("write", lambda *_a: self._preview_currency())
+
+        self.currency_preview = tk.Label(
+            currency_row, text="", bg=self.theme["background"], fg=self.theme["text"],
+            font=text_font(11, bold=True),
+        )
+        self.currency_preview.pack(side="left", padx=(SPACE_4, 0))
+
+        tk.Label(
+            self,
+            text="Pick one or type your own symbol. Only how amounts are shown changes; "
+            "nothing is converted and no rate is looked up.",
+            bg=self.theme["background"], fg=self.theme["text_muted"],
+            font=text_font(9), justify="left", wraplength=420,
+        ).grid(row=92, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_4))
+
+        tk.Label(
+            self, text="Reminders", bg=self.theme["background"], fg=self.theme["text"],
+            font=text_font(11, bold=True),
+        ).grid(row=93, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_1))
 
         tk.Label(
             self,
@@ -3684,17 +3759,17 @@ class RemindersDialog(tk.Toplevel):
             font=text_font(9),
             justify="left",
             wraplength=420,
-        ).grid(row=1, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_4))
+        ).grid(row=94, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_4))
 
         ttk.Checkbutton(
             self,
             text="Remind me before a payment is due",
             variable=self.enabled_var,
             command=self._sync_state,
-        ).grid(row=2, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_3))
+        ).grid(row=95, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_3))
 
         row = tk.Frame(self, bg=self.theme["background"])
-        row.grid(row=3, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_2))
+        row.grid(row=96, column=0, sticky="w", padx=SPACE_5, pady=(0, SPACE_2))
 
         tk.Label(
             row, text="How much warning", bg=self.theme["background"],
@@ -3726,10 +3801,10 @@ class RemindersDialog(tk.Toplevel):
             justify="left",
             wraplength=420,
         )
-        self.status_label.grid(row=4, column=0, sticky="w", padx=SPACE_5, pady=(SPACE_2, SPACE_3))
+        self.status_label.grid(row=97, column=0, sticky="w", padx=SPACE_5, pady=(SPACE_2, SPACE_3))
 
         actions = tk.Frame(self, bg=self.theme["background"])
-        actions.grid(row=5, column=0, sticky="e", padx=SPACE_5, pady=(SPACE_2, SPACE_5))
+        actions.grid(row=98, column=0, sticky="e", padx=SPACE_5, pady=(SPACE_2, SPACE_5))
         self.test_button = PillButton(
             actions, "Show a test reminder", self.send_test, self.theme, variant="outlined"
         )
@@ -3739,9 +3814,38 @@ class RemindersDialog(tk.Toplevel):
         )
         PillButton(actions, "Save", self.save, self.theme, variant="filled").grid(row=0, column=2)
 
+        self._preview_currency()
         self._sync_state()
         if master is not None and master.winfo_viewable():
             self.transient(master)
+
+    # --- currency ---------------------------------------------------------
+
+    def _describe_currency(self, symbol: str) -> str:
+        """"Rs.  —  Nepalese rupee", or just the symbol if it is not a known one."""
+        for code, known, _space, name in CURRENCIES:
+            if known == symbol:
+                return known + "  \u2014  " + name
+        return symbol
+
+    def _selected_symbol(self) -> str:
+        """The symbol out of whatever is in the box, typed or chosen."""
+        text = self.currency_var.get().strip()
+        for code, symbol, _space, name in CURRENCIES:
+            if text == self._describe_currency(symbol):
+                return symbol
+        # Someone typed their own. Take what is before any dash they added.
+        return text.split("\u2014")[0].strip() or DEFAULT_CURRENCY
+
+    def _preview_currency(self) -> None:
+        """Show a real amount in the chosen symbol, before anything is saved."""
+        symbol = self._selected_symbol()
+        was = current_currency()
+        try:
+            set_currency(symbol)
+            self.currency_preview.config(text=money(1234.5))
+        finally:
+            set_currency(was)
 
     # --- days are stored as a number, shown as a phrase -------------------
 
@@ -3794,7 +3898,8 @@ class RemindersDialog(tk.Toplevel):
             return
         notifier.register_app_id()
         shown = notifier.show_toast(
-            "Netflix Premium", "Charging $22.99 to Chase Freedom in 3 days, on Wed 26 Aug."
+            "Netflix Premium",
+            "Charging " + money(22.99) + " to Chase Freedom in 3 days, on Wed 26 Aug."
         )
         if shown:
             self.status_label.configure(
@@ -3809,6 +3914,10 @@ class RemindersDialog(tk.Toplevel):
             )
 
     def save(self) -> None:
+        save_currency(self.data_file, self._selected_symbol())
+        if self.refresh_callback is not None:
+            self.refresh_callback()
+
         enabled = self.enabled_var.get()
         set_setting(self.data_file, REMINDERS_ENABLED, "1" if enabled else "0")
         set_setting(self.data_file, REMINDER_DAYS, str(self._selected_days()))
@@ -3971,7 +4080,7 @@ class CardPaymentDialog(tk.Toplevel):
 
     def _parse(self, text: str):
         """Returns (ok, value). An empty field is a valid instruction to clear."""
-        cleaned = text.strip().lstrip("$").replace(",", "")
+        cleaned = _strip_currency(text)
         if not cleaned:
             return True, None
         try:
@@ -3992,7 +4101,7 @@ class CardPaymentDialog(tk.Toplevel):
                 months += 1
         word = "month" if months == 1 else "months"
         self.total_label.config(
-            text=str(self.year) + " so far:  $" + format(total, ",.2f") + "  across " + str(months) + " " + word
+            text=str(self.year) + " so far:  " + money(total) + "  across " + str(months) + " " + word
         )
 
     def save_payments(self) -> None:
@@ -4603,7 +4712,7 @@ class AddExpenseDialog(tk.Toplevel):
         if not amount_text:
             return None
 
-        normalized = amount_text.replace(" ", "").replace("$", "")
+        normalized = _strip_currency(amount_text).replace(" ", "")
         if "," in normalized and "." in normalized:
             normalized = normalized.replace(",", "")
         else:
@@ -4728,6 +4837,8 @@ def run_due_check(argv=None) -> int:
     argv = list(sys.argv if argv is None else argv)
     data_file = get_app_data_file()
     create_schema(data_file)
+    # The reminder text names an amount, so this mode needs the currency too.
+    load_currency(data_file)
 
     if not reminders_are_on(data_file):
         return 0
