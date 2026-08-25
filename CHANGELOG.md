@@ -3,6 +3,30 @@
 What changed in each version. Newest first. Every version can be downloaded from the
 [releases page](https://github.com/paudel01anurag/duekhata-subscription-tracker/releases).
 
+## v3.6.0 — 25 August 2026
+
+Amounts no longer have to be dollars.
+
+**Added**
+
+- **A currency setting.** Ten are offered — US dollar, Nepalese rupee, Indian rupee, pound sterling,
+  euro, Australian and Canadian dollar, yen, dirham and Singapore dollar — and the box can be typed
+  into, so a symbol that is not listed can simply be entered. The dollar remains the default, and a
+  preview shows a real amount before anything is saved.
+
+  **Nothing is converted.** This changes the symbol amounts are drawn with and nothing else: no rate
+  is looked up, no stored figure moves, and one installation is one currency.
+
+- The entry form's amount field now names the currency it is asking for, so it reads
+  **Amount (Rs.)** rather than just Amount.
+
+**Changed**
+
+- Reminders moved into a **Settings** dialog alongside the currency, reached by the gear in the
+  sidebar where the bell used to be. Two settings did not justify two icons.
+- Amount boxes accept the symbol back, so "Rs. 1,200" is understood as readily as "1200". Previously
+  only a dollar sign was stripped.
+
 ## v3.5.0 — 25 August 2026
 
 Your data can leave the machine it lives on, a subscription can be paused rather than deleted, and
